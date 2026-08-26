@@ -27,10 +27,30 @@ import {
 export const PROVIDER = "nvidia";
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
-export const OVERRIDES_FILE = join(EXT_DIR, "..", "overrides", "models.json");
-export const MODELS_JSON = join(homedir(), ".pi", "agent", "models.json");
-export const STATE_FILE = join(homedir(), ".pi", "agent", "nvidia-plus-models.json");
-export const BACKUP_FILE = `${MODELS_JSON}.bak-pi-nvidia-plus`;
+const DEFAULT_BASE_DIR = join(homedir(), ".pi", "agent");
+const DEFAULT_OVERRIDES_FILE = join(EXT_DIR, "..", "overrides", "models.json");
+
+/** Шов C: пути файлового слоя — параметром, дефолты для боевого запуска. */
+export interface StorePaths {
+  overridesFile: string;
+  modelsJson: string;
+  stateFile: string;
+  backupFile: string;
+}
+
+export function storePaths(baseDir: string = DEFAULT_BASE_DIR, overridesFile: string = DEFAULT_OVERRIDES_FILE): StorePaths {
+  const modelsJson = join(baseDir, "models.json");
+  return {
+    overridesFile,
+    modelsJson,
+    stateFile: join(baseDir, "nvidia-plus-models.json"),
+    backupFile: `${modelsJson}.bak-pi-nvidia-plus`,
+  };
+}
+
+// Дефолтные пути — для сообщений пользователю во входной точке.
+export const MODELS_JSON = storePaths().modelsJson;
+export const STATE_FILE = storePaths().stateFile;
 
 function readJson(path: string): unknown | undefined {
   if (!existsSync(path)) return undefined;
@@ -41,12 +61,12 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function backupModelsJson(): void {
-  if (existsSync(MODELS_JSON)) copyFileSync(MODELS_JSON, BACKUP_FILE);
+function backupModelsJson(paths: StorePaths): void {
+  if (existsSync(paths.modelsJson)) copyFileSync(paths.modelsJson, paths.backupFile);
 }
 
-export function loadOverrides(): ModelsJson {
-  const parsed = readJson(OVERRIDES_FILE);
+export function loadOverrides(paths: StorePaths = storePaths()): ModelsJson {
+  const parsed = readJson(paths.overridesFile);
   validateOverrides(parsed);
   const foreign = Object.keys(parsed.providers ?? {}).filter((p) => p !== PROVIDER);
   if (foreign.length > 0) {
@@ -55,8 +75,8 @@ export function loadOverrides(): ModelsJson {
   return parsed;
 }
 
-export function loadState(): OwnedState | undefined {
-  const parsed = readJson(STATE_FILE);
+export function loadState(paths: StorePaths = storePaths()): OwnedState | undefined {
+  const parsed = readJson(paths.stateFile);
   if (!parsed || typeof parsed !== "object") return undefined;
   const state = parsed as OwnedState;
   if (state.version !== 1 || !state.providers) return undefined;
@@ -74,17 +94,17 @@ export interface ApplyFilesResult {
  * `overwrite: false` (автоприменение) — конфликтные записи пропускаются;
  * `overwrite: true` (явная команда с `force`) — перезаписываются.
  */
-export function applyFiles(overwrite: boolean): ApplyFilesResult {
-  const desired = loadOverrides();
-  const target = (readJson(MODELS_JSON) ?? {}) as ModelsJson;
-  const ledger = loadState();
+export function applyFiles(overwrite: boolean, paths: StorePaths = storePaths()): ApplyFilesResult {
+  const desired = loadOverrides(paths);
+  const target = (readJson(paths.modelsJson) ?? {}) as ModelsJson;
+  const ledger = loadState(paths);
 
   const outcome = applyOverrides(target, desired, ledger, overwrite);
   if (outcome.changed) {
-    backupModelsJson();
-    writeJson(MODELS_JSON, outcome.merged);
+    backupModelsJson(paths);
+    writeJson(paths.modelsJson, outcome.merged);
   }
-  writeJson(STATE_FILE, mergeOwnedStates(ledger, outcome.state));
+  writeJson(paths.stateFile, mergeOwnedStates(ledger, outcome.state));
   return { changed: outcome.changed, conflicts: outcome.conflicts, summary: outcome.summary };
 }
 
@@ -96,19 +116,19 @@ export interface RollbackFilesResult {
 }
 
 /** Откатить наши записи из `models.json` по леджеру. */
-export function rollbackFiles(): RollbackFilesResult {
-  const ledger = loadState();
+export function rollbackFiles(paths: StorePaths = storePaths()): RollbackFilesResult {
+  const ledger = loadState(paths);
   if (!ledger) return { changed: false, removed: [], kept: [], hadState: false };
 
-  const target = (readJson(MODELS_JSON) ?? {}) as ModelsJson;
+  const target = (readJson(paths.modelsJson) ?? {}) as ModelsJson;
   const outcome = rollbackOverrides(target, ledger);
   if (outcome.changed) {
-    backupModelsJson();
-    writeJson(MODELS_JSON, outcome.merged);
+    backupModelsJson(paths);
+    writeJson(paths.modelsJson, outcome.merged);
   }
   // Откат гасит автоприменение: леджер сохраняется с `enabled: false`,
   // чтобы следующий `session_start` не вернул записи молча.
-  writeJson(STATE_FILE, outcome.remainingState
+  writeJson(paths.stateFile, outcome.remainingState
     ? { ...outcome.remainingState, enabled: false }
     : { version: 1, appliedAt: new Date().toISOString(), enabled: false, providers: {} });
 
