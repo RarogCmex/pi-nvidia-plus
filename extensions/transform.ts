@@ -26,6 +26,12 @@ const NEMOTRON_THINKING_MODELS = new Set([
   "nvidia/nemotron-3.5-lightning-30b-a3b",
 ]);
 
+// ── Гипотезы из референсов (НЕ проверены: живых моделей этих семейств нет) ──
+// Источник — `subprojects/pi-nvidia-nim-provider` (handlers/thinking.ts,
+// config/model-families.ts). Включатся сами, если модель появится в каталоге.
+const DEEPSEEK_V4 = /^deepseek-ai\/deepseek-v4/;
+const GLM = /^z-ai\/glm/;
+
 function minimaxThinkingMode(level: string): string {
   if (level === "off") return "disabled";
   if (level === "high" || level === "xhigh" || level === "max") return "enabled";
@@ -41,6 +47,16 @@ export function thinkingPlan(modelId: string, level: string): string | undefined
     if (level === "off") return "chat_template_kwargs.enable_thinking=false";
     const low = level === "minimal" || level === "low" ? ", low_effort=true" : "";
     return `chat_template_kwargs.enable_thinking=true${low}`;
+  }
+  if (DEEPSEEK_V4.test(modelId)) {
+    return level === "off"
+      ? "chat_template_kwargs.thinking=false"
+      : "chat_template_kwargs.thinking=true, reasoning_effort";
+  }
+  if (GLM.test(modelId)) {
+    if (level === "off") return "chat_template_kwargs.enable_thinking=false, clear_thinking=true";
+    const effort = level === "minimal" ? "" : `, reasoning_effort=${level === "xhigh" || level === "max" ? "max" : "high"}`;
+    return `chat_template_kwargs.enable_thinking=true, clear_thinking=false${effort}`;
   }
   return undefined;
 }
@@ -94,6 +110,86 @@ function applyThinking(payload: Payload, modelId: string, level: string): boolea
   return false;
 }
 
+/**
+ * DeepSeek V4 (гипотеза из референсов, живых моделей нет — не проверена):
+ * пи шлёт `thinking` и `reasoning_effort` top-level, NIM требует их в
+ * `chat_template_kwargs`. Преобразование по референс-хендлеру "deepseek-v4".
+ */
+function applyDeepSeekV4Thinking(payload: Payload, level: string): boolean {
+  const kwargs = ensureChatTemplateKwargs(payload);
+  const on = level !== "off";
+  let modified = false;
+  if (kwargs.thinking !== on) {
+    kwargs.thinking = on;
+    modified = true;
+  }
+  if (on) {
+    const effort = typeof payload.reasoning_effort === "string" ? payload.reasoning_effort : "high";
+    if (kwargs.reasoning_effort !== effort) {
+      kwargs.reasoning_effort = effort;
+      modified = true;
+    }
+  } else if ("reasoning_effort" in kwargs) {
+    delete kwargs.reasoning_effort;
+    modified = true;
+  }
+  if ("thinking" in payload) {
+    delete payload.thinking;
+    modified = true;
+  }
+  if ("reasoning_effort" in payload) {
+    delete payload.reasoning_effort;
+    modified = true;
+  }
+  return modified;
+}
+
+/**
+ * GLM (гипотеза из референсов, живых моделей нет — не проверена): пи в формате
+ * `zai` шлёт объект `thinking` + `reasoning_effort`; GLM на NIM требует
+ * `enable_thinking`/`clear_thinking` в `chat_template_kwargs` и отображённое
+ * усилие top-level (референс-хендлер "qwen-chat-template" для `z-ai/glm`).
+ */
+function applyGlmThinking(payload: Payload, level: string): boolean {
+  const kwargs = ensureChatTemplateKwargs(payload);
+  const on = level !== "off";
+  let modified = false;
+  if (kwargs.enable_thinking !== on) {
+    kwargs.enable_thinking = on;
+    modified = true;
+  }
+  const clear = !on;
+  if (kwargs.clear_thinking !== clear) {
+    kwargs.clear_thinking = clear;
+    modified = true;
+  }
+  if ("preserve_thinking" in kwargs) {
+    delete kwargs.preserve_thinking;
+    modified = true;
+  }
+  const effort = on
+    ? level === "xhigh" || level === "max"
+      ? "max"
+      : level === "minimal"
+        ? undefined
+        : "high"
+    : undefined;
+  if (effort === undefined) {
+    if ("reasoning_effort" in payload) {
+      delete payload.reasoning_effort;
+      modified = true;
+    }
+  } else if (payload.reasoning_effort !== effort) {
+    payload.reasoning_effort = effort;
+    modified = true;
+  }
+  if ("thinking" in payload) {
+    delete payload.thinking;
+    modified = true;
+  }
+  return modified;
+}
+
 /** Текстовые контент-массивы → строка (старые/мелкие NIM отвергают массивы). */
 function normalizeContentArrays(payload: Payload): boolean {
   const messages = payload.messages as Array<{ content?: unknown }> | undefined;
@@ -117,7 +213,13 @@ function normalizeContentArrays(payload: Payload): boolean {
 export function transformRequest(payload: Payload, ctx: TransformContext): TransformResult {
   let modified = false;
   if (ctx.modelId && typeof ctx.thinkingLevel === "string") {
-    modified = applyThinking(payload, ctx.modelId, ctx.thinkingLevel) || modified;
+    if (DEEPSEEK_V4.test(ctx.modelId)) {
+      modified = applyDeepSeekV4Thinking(payload, ctx.thinkingLevel) || modified;
+    } else if (GLM.test(ctx.modelId)) {
+      modified = applyGlmThinking(payload, ctx.thinkingLevel) || modified;
+    } else {
+      modified = applyThinking(payload, ctx.modelId, ctx.thinkingLevel) || modified;
+    }
   }
   modified = normalizeContentArrays(payload) || modified;
   if (payload.max_tokens == null && payload.max_completion_tokens == null) {

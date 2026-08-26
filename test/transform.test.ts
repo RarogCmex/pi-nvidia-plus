@@ -95,4 +95,75 @@ const bare = transformRequest(
 assert.equal((bare.payload.messages as any[])[0].content, "x");
 assert.equal(kwargs(bare.payload).thinking_mode, undefined, "без уровня инжектится мышление");
 
+// 9. Гипотезы из референсов (непроверенные семейства, живых моделей нет).
+// DeepSeek V4: пи шлёт `thinking` + `reasoning_effort` top-level, NIM требует
+// их в `chat_template_kwargs` (референс: формат "deepseek-v4").
+const DSV4 = "deepseek-ai/deepseek-v4-flash-0731";
+const dsOn = transformRequest(
+  { model: DSV4, thinking: { type: "enabled" }, reasoning_effort: "high" },
+  { modelId: DSV4, thinkingLevel: "high" },
+);
+assert.equal(kwargs(dsOn.payload).thinking, true, "DeepSeek V4: thinking не перенесён в kwargs");
+assert.equal(kwargs(dsOn.payload).reasoning_effort, "high", "DeepSeek V4: effort не перенесён");
+assert.equal(dsOn.payload.thinking, undefined, "DeepSeek V4: top-level thinking не удалён");
+assert.equal(dsOn.payload.reasoning_effort, undefined, "DeepSeek V4: top-level effort не удалён");
+
+const dsOff = transformRequest(
+  { model: DSV4, thinking: { type: "disabled" } },
+  { modelId: DSV4, thinkingLevel: "off" },
+);
+assert.equal(kwargs(dsOff.payload).thinking, false, "DeepSeek V4: off не даёт thinking=false");
+assert.equal(kwargs(dsOff.payload).reasoning_effort, undefined, "DeepSeek V4: off не должен слать effort");
+
+// Без явного усилия при включённом мышлении — дефолт "high" (как в референсе).
+const dsDefault = transformRequest(
+  { model: DSV4, thinking: { type: "enabled" } },
+  { modelId: DSV4, thinkingLevel: "high" },
+);
+assert.equal(kwargs(dsDefault.payload).reasoning_effort, "high", "DeepSeek V4: дефолт effort не high");
+
+// GLM (z-ai/glm*): enable_thinking + clear_thinking в kwargs, усилие —
+// отображённое в top-level `reasoning_effort` (референс: формат "qwen-chat-template").
+const GLM = "z-ai/glm-5";
+const glmOn = transformRequest(
+  { model: GLM, thinking: { type: "enabled", clear_thinking: false }, reasoning_effort: "medium" },
+  { modelId: GLM, thinkingLevel: "medium" },
+);
+assert.equal(kwargs(glmOn.payload).enable_thinking, true, "GLM: enable_thinking не включён");
+assert.equal(kwargs(glmOn.payload).clear_thinking, false, "GLM: clear_thinking должен быть false");
+assert.equal(glmOn.payload.reasoning_effort, "high", "GLM: medium не отображён в high");
+assert.equal(glmOn.payload.thinking, undefined, "GLM: pi-объект thinking не удалён");
+
+const glmMax = transformRequest(
+  { model: GLM, thinking: { type: "enabled" }, reasoning_effort: "max" },
+  { modelId: GLM, thinkingLevel: "max" },
+);
+assert.equal(glmMax.payload.reasoning_effort, "max", "GLM: max не сохранён");
+
+const glmMinimal = transformRequest(
+  { model: GLM, thinking: { type: "enabled" }, reasoning_effort: "minimal" },
+  { modelId: GLM, thinkingLevel: "minimal" },
+);
+assert.equal(glmMinimal.payload.reasoning_effort, undefined, "GLM: minimal должен убратьть effort");
+
+const glmOff = transformRequest(
+  { model: GLM, thinking: { type: "disabled" }, reasoning_effort: "high" },
+  { modelId: GLM, thinkingLevel: "off" },
+);
+assert.equal(kwargs(glmOff.payload).enable_thinking, false, "GLM: off не выключил мышление");
+assert.equal(kwargs(glmOff.payload).clear_thinking, true, "GLM: off должен ставить clear_thinking");
+assert.equal(glmOff.payload.reasoning_effort, undefined, "GLM: off должен убратьть effort");
+
+// GLM: preserve_thinking (ставит нативный механизм пи) заменяется на схему clear_thinking.
+const glmPreserve = transformRequest(
+  { model: GLM, thinking: { type: "enabled" }, chat_template_kwargs: { preserve_thinking: true } },
+  { modelId: GLM, thinkingLevel: "high" },
+);
+assert.equal(kwargs(glmPreserve.payload).preserve_thinking, undefined, "GLM: preserve_thinking не убран");
+
+// 10. Планы для новых семейств видны в диагностике.
+assert.equal(thinkingPlan(DSV4, "high"), "chat_template_kwargs.thinking=true, reasoning_effort");
+assert.equal(thinkingPlan(GLM, "off"), "chat_template_kwargs.enable_thinking=false, clear_thinking=true");
+assert.equal(thinkingPlan(GLM, "high"), "chat_template_kwargs.enable_thinking=true, clear_thinking=false, reasoning_effort=high");
+
 console.log("transform: все проверки прошли");
