@@ -134,7 +134,8 @@ function makeTarget(name: string) {
   assert.equal(nvidia.calls.length, 2);
 }
 
-// 8. Обёртка обработчика: наблюдение за ответами, диагностика 429, прозрачность вызовов
+// 8. Обёртка обработчика (новый протокол ундичи 7+: onResponseStart/onResponseError):
+// наблюдение за ответами, диагностика 429, прозрачность вызовов, мутация того же объекта.
 {
   const nvidia = makeTarget("proxy");
   const fallback = makeTarget("prev");
@@ -150,46 +151,74 @@ function makeTarget(name: string) {
 
   const received: string[] = [];
   const handler = {
-    onResponse(statusCode: number, headers: unknown) {
-      received.push(`response:${statusCode}`);
+    onResponseStart(controller: unknown, statusCode: number, headers: unknown, statusMessage: unknown) {
+      received.push(`start:${statusCode}`);
       return true;
     },
-    onData(_chunk: unknown) {
+    onResponseData(_chunk: unknown) {
       received.push("data");
       return true;
     },
-    onComplete(_trailers: unknown) {
-      received.push("complete");
+    onResponseEnd(_trailers: unknown) {
+      received.push("end");
       return true;
     },
   };
 
   dispatcher.dispatch({ origin: NVIDIA_ORIGIN }, handler);
-  const wrapped = nvidia.calls[0].handler as typeof handler;
-  // Плоские массивные заголовки, как отдаёт undici
-  wrapped.onResponse(429, ["Retry-After", "32", "X-Request-ID", "r1"]);
-  assert.deepEqual(received, ["response:429"], "оригинальный обработчик не вызван");
+  assert.strictEqual(nvidia.calls[0].handler, handler, "обёртка должна мутировать тот же объект (как интерцепторы ундичи)");
+  handler.onResponseStart(null, 429, { "Retry-After": "32", "X-Request-ID": "r1" }, "");
+  assert.deepEqual(received, ["start:429"], "оригинальный обработчик не вызван");
   assert.equal(observed.length, 1);
   assert.equal(observed[0].status, 429);
   assert.equal(observed[0].headers["retry-after"], "32");
   assert.equal(diagnostics.length, 1);
 
-  // 200 — наблюдение есть, диагностики нет
-  wrapped.onResponse(200, ["Content-Type", "text/event-stream"]);
+  // 200 — наблюдение есть, диагностики нет; значения-массивы склеиваются.
+  handler.onResponseStart(null, 200, { "Content-Type": ["text/event-stream"] }, "");
   assert.equal(observed.length, 2);
+  assert.equal(observed[1].headers["content-type"], "text/event-stream");
   assert.equal(diagnostics.length, 1);
 
-  // Остальные методы пробрасываются
-  wrapped.onData("x");
-  wrapped.onComplete(null);
-  assert.deepEqual(received.slice(2), ["data", "complete"]);
+  // Остальные методы не задеты обёрткой.
+  handler.onResponseData("x");
+  handler.onResponseEnd(null);
+  assert.deepEqual(received.slice(2), ["data", "end"]);
 
-  // Не-nvidia запросы идут без обёртки
+  // Повторная обёртка того же хендлера идемпотентна (защита от цепочек).
+  const before = handler.onResponseStart;
+  dispatcher.dispatch({ origin: NVIDIA_ORIGIN }, handler);
+  assert.strictEqual(handler.onResponseStart, before, "двойное оборачивание");
+  assert.equal(nvidia.calls.length, 2);
+
+  // Не-nvidia запросы идут без обёртки.
   dispatcher.dispatch({ origin: "https://example.com" }, handler);
   assert.strictEqual(fallback.calls[0].handler, handler);
 }
 
-// 9. Обёртка обработчика: ошибки соединения переписываются в понятные про прокси
+// 8a. Старый протокол (onResponse/onError) тоже поддерживается.
+{
+  const observedStatuses: number[] = [];
+  const dispatcher = createSelectiveDispatcher({
+    nvidia: makeTarget("proxy"),
+    fallback: makeTarget("prev"),
+    proxyUrl: "http://proxy.local:8870/",
+    onObserved: (status) => observedStatuses.push(status),
+  });
+  const received: string[] = [];
+  const legacy = {
+    onResponse(statusCode: number, headers: unknown) {
+      received.push(`response:${statusCode}`);
+      return true;
+    },
+  };
+  dispatcher.dispatch({ origin: NVIDIA_ORIGIN }, legacy);
+  legacy.onResponse(503, ["Retry-After", "5"]);
+  assert.deepEqual(received, ["response:503"]);
+  assert.deepEqual(observedStatuses, [503]);
+}
+
+// 9. Обёртка обработчика: ошибки соединения переписываются в понятные про прокси (новый протокол).
 {
   const nvidia = makeTarget("proxy");
   const fallback = makeTarget("prev");
@@ -199,25 +228,57 @@ function makeTarget(name: string) {
     proxyUrl: "http://192.168.88.248:8870/",
   });
   const errors: Error[] = [];
-  const handler = { onError(err: Error) { errors.push(err); } };
+  const handler = { onResponseError(_controller: unknown, err: Error) { errors.push(err); } };
   dispatcher.dispatch({ origin: NVIDIA_ORIGIN }, handler);
-  const wrapped = nvidia.calls[0].handler as typeof handler;
 
   const conn = new Error("connect ECONNREFUSED 192.168.88.248:8870") as NodeJS.ErrnoException;
   conn.code = "ECONNREFUSED";
-  wrapped.onError(conn);
+  handler.onResponseError(null, conn);
   assert.equal(errors.length, 1);
   assert.ok(errors[0].message.includes("прокси"), errors[0].message);
   assert.ok(errors[0].message.includes("192.168.88.248:8870"), errors[0].message);
   assert.equal((errors[0] as NodeJS.ErrnoException).code, "ECONNREFUSED", "код потерян");
-
-  // Не-соединительная ошибка проходит как есть
-  const abort = new Error("Request aborted");
-  abort.name = "AbortError";
-  wrapped.onError(abort);
-  assert.strictEqual(errors[1], abort);
+  assert.strictEqual(errors[0].cause, conn, "причина потеряна");
 }
 
+// 9a. Старый протокол ошибок (onError): соединительные переписываются, остальные как есть.
+{
+  const dispatcher = createSelectiveDispatcher({
+    nvidia: makeTarget("proxy"),
+    fallback: makeTarget("prev"),
+    proxyUrl: "http://192.168.88.248:8870/",
+  });
+  const errors: unknown[] = [];
+  const legacy = { onError(err: unknown) { errors.push(err); } };
+  dispatcher.dispatch({ origin: NVIDIA_ORIGIN }, legacy);
+
+  const conn = new Error("connect ECONNREFUSED") as NodeJS.ErrnoException;
+  conn.code = "ECONNREFUSED";
+  legacy.onError(conn);
+  assert.ok(errors[0] instanceof Error && (errors[0] as Error).message.includes("прокси"));
+
+  const abort = new Error("Request aborted");
+  abort.name = "AbortError";
+  legacy.onError(abort);
+  assert.strictEqual(errors[1], abort);
+}
+// 9b. onProxyError вызывается с понятным сообщением при переписывании ошибки.
+{
+  const proxyErrors: string[] = [];
+  const dispatcher = createSelectiveDispatcher({
+    nvidia: makeTarget("proxy"),
+    fallback: makeTarget("prev"),
+    proxyUrl: "http://192.168.88.248:8870/",
+    onProxyError: (message) => proxyErrors.push(message),
+  });
+  const handler = { onResponseError(_c: unknown, _err: Error) {} };
+  dispatcher.dispatch({ origin: NVIDIA_ORIGIN }, handler);
+  const conn = new Error("connect ECONNREFUSED") as NodeJS.ErrnoException;
+  conn.code = "ECONNREFUSED";
+  handler.onResponseError(null, conn);
+  assert.equal(proxyErrors.length, 1);
+  assert.ok(proxyErrors[0].includes("прокси") && proxyErrors[0].includes("ECONNREFUSED"), proxyErrors[0]);
+}
 // 10. Идемпотентная установка: маркер, повтор не ставит вторую обёртку
 {
   const prevGlobal = makeTarget("prev-global");

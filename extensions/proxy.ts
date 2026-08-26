@@ -41,19 +41,22 @@ export function isNvidiaOrigin(origin: unknown): boolean {
   }
 }
 
-/** Заголовки из плоского массива undici `[k1, v1, k2, v2]` или объекта; ключи в нижний регистр. */
+/** Заголовки из плоского массива ундичи `[k1, v1, k2, v2]` или объекта (`parseHeaders`); ключи в нижний регистр, массивы значений склеиваются. */
 export function headersToRecord(headers: unknown): Record<string, string> {
   const out: Record<string, string> = {};
+  const put = (key: unknown, value: unknown): void => {
+    if (typeof key !== "string") return;
+    if (typeof value === "string") {
+      out[key.toLowerCase()] = value;
+    } else if (Array.isArray(value)) {
+      const parts = value.filter((v): v is string => typeof v === "string");
+      if (parts.length > 0) out[key.toLowerCase()] = parts.join(", ");
+    }
+  };
   if (Array.isArray(headers)) {
-    for (let i = 0; i + 1 < headers.length; i += 2) {
-      const key = headers[i];
-      const value = headers[i + 1];
-      if (typeof key === "string" && typeof value === "string") out[key.toLowerCase()] = value;
-    }
+    for (let i = 0; i + 1 < headers.length; i += 2) put(headers[i], headers[i + 1]);
   } else if (headers && typeof headers === "object") {
-    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
-      if (typeof value === "string") out[key.toLowerCase()] = value;
-    }
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) put(key, value);
   }
   return out;
 }
@@ -149,12 +152,99 @@ export interface SelectiveDispatcherOptions {
   onObserved?: (status: number, headers: Record<string, string>) => void;
   /** Вызывается для ответов 429/5xx. */
   onDiagnostic?: (diagnostic: NimDiagnostic) => void;
+  /** Вызывается при ошибках соединения на nvidia-маршруте (после переписывания в понятную). */
+  onProxyError?: (message: string, cause: unknown) => void;
 }
 
-const OUR_DISPATCHER_MARK = "__piNvidiaPlusSelectiveDispatcher";
+export const OUR_DISPATCHER_MARK = "__piNvidiaPlusSelectiveDispatcher";
+const wrappedHandlers = new WeakSet<object>();
+
+/**
+ * Оборачивает колбэки ответа/ошибки хендлера напрямую (так же, как встроенные
+ * интерцепторы ундичи — например, `ProxyAgent` сам подменяет `onResponseStart`).
+ * Поддержаны оба протокола: новый (`onResponseStart`/`onResponseError`, ундичи 7+)
+ * и старый (`onResponse`/`onError`). Идемпотентно по `WeakSet`.
+ */
+function wrapHandler(
+  handler: unknown,
+  proxyUrl: string,
+  onObserved?: (status: number, headers: Record<string, string>) => void,
+  onDiagnostic?: (diagnostic: NimDiagnostic) => void,
+  onProxyError?: (message: string, cause: unknown) => void,
+): unknown {
+  if (!handler || typeof handler !== "object" || wrappedHandlers.has(handler as object)) return handler;
+  const h = handler as Record<string, unknown>;
+
+  const observe = (statusCode: number, headers: unknown): void => {
+    try {
+      const record = headersToRecord(headers);
+      onObserved?.(statusCode, record);
+      const diagnostic = extractDiagnostics(statusCode, record);
+      if (diagnostic) onDiagnostic?.(diagnostic);
+    } catch {
+      // наблюдение не должно ломать запрос
+    }
+  };
+
+  const rewriteError = (err: unknown): unknown => {
+    if (!isProxyConnectError(err)) return err;
+    const message = describeProxyFailure(proxyUrl, err);
+    const wrapped = new Error(message);
+    wrapped.cause = err;
+    (wrapped as NodeJS.ErrnoException).code = (err as NodeJS.ErrnoException).code;
+    try {
+      onProxyError?.(message, err);
+    } catch {
+      // наблюдение не должно ломать запрос
+    }
+    return wrapped;
+  };
+
+  // Новый протокол (ундичи 7+): именно его используют `ProxyAgent` и fetch пи.
+  if (typeof h.onResponseStart === "function") {
+    const original = h.onResponseStart as (...args: unknown[]) => unknown;
+    h.onResponseStart = function (controller: unknown, statusCode: number, headers: unknown, statusMessage: unknown) {
+      observe(statusCode, headers);
+      return original.call(this, controller, statusCode, headers, statusMessage);
+    };
+  }
+  if (typeof h.onResponseError === "function") {
+    const original = h.onResponseError as (...args: unknown[]) => unknown;
+    h.onResponseError = function (controller: unknown, err: unknown) {
+      return original.call(this, controller, rewriteError(err));
+    };
+  }
+  // Старый протокол — на случай другого транспорта.
+  if (typeof h.onResponse === "function") {
+    const original = h.onResponse as (...args: unknown[]) => unknown;
+    h.onResponse = function (statusCode: number, headers: unknown) {
+      observe(statusCode, headers);
+      return original.call(this, statusCode, headers);
+    };
+  }
+  if (typeof h.onError === "function") {
+    const original = h.onError as (...args: unknown[]) => unknown;
+    h.onError = function (err: unknown) {
+      return original.call(this, rewriteError(err));
+    };
+  }
+
+  wrappedHandlers.add(h as object);
+  return h;
+}
 
 export function isOurDispatcher(dispatcher: unknown): boolean {
   return !!dispatcher && (dispatcher as Record<string, unknown>)[OUR_DISPATCHER_MARK] === true;
+}
+
+/** Помечает произвольный объект как нашу обёртку (для адаптеров-подклассов). */
+export function markDispatcher(dispatcher: object): void {
+  Object.defineProperty(dispatcher, OUR_DISPATCHER_MARK, { value: true, enumerable: false });
+}
+
+export interface SelectiveDispatcherHandle extends DispatchTarget {
+  close(): Promise<void>;
+  destroy(): Promise<void>;
 }
 
 /**
@@ -162,44 +252,8 @@ export function isOurDispatcher(dispatcher: unknown): boolean {
  * добавляет входная точка, если нужно). Наблюдает ответы и ошибки соединения
  * на nvidia-маршруте, остальное делегирует как есть.
  */
-export function createSelectiveDispatcher(options: SelectiveDispatcherOptions): DispatchTarget & Record<string, unknown> {
+export function createSelectiveDispatcher(options: SelectiveDispatcherOptions): SelectiveDispatcherHandle & Record<string, unknown> {
   const { nvidia, fallback, proxyUrl, onObserved, onDiagnostic } = options;
-
-  function wrapHandler(handler: unknown): unknown {
-    const target = (handler ?? {}) as Record<string, unknown>;
-    return new Proxy(target, {
-      get(obj, prop, receiver) {
-        if (prop === "onResponse") {
-          return (statusCode: number, headers: unknown) => {
-            try {
-              const record = headersToRecord(headers);
-              onObserved?.(statusCode, record);
-              const diagnostic = extractDiagnostics(statusCode, record);
-              if (diagnostic) onDiagnostic?.(diagnostic);
-            } catch {
-              // наблюдение не должно ломать запрос
-            }
-            const original = obj.onResponse;
-            return typeof original === "function" ? original.call(obj, statusCode, headers) : true;
-          };
-        }
-        if (prop === "onError") {
-          return (err: unknown) => {
-            let reported: unknown = err;
-            if (isProxyConnectError(err)) {
-              const wrapped = new Error(describeProxyFailure(proxyUrl, err));
-              wrapped.cause = err;
-              (wrapped as NodeJS.ErrnoException).code = (err as NodeJS.ErrnoException).code;
-              reported = wrapped;
-            }
-            const original = obj.onError;
-            return typeof original === "function" ? original.call(obj, reported) : true;
-          };
-        }
-        return Reflect.get(obj, prop, receiver);
-      },
-    });
-  }
 
   return {
     [OUR_DISPATCHER_MARK]: true,
@@ -211,7 +265,7 @@ export function createSelectiveDispatcher(options: SelectiveDispatcherOptions): 
         origin = undefined;
       }
       if (isNvidiaOrigin(origin)) {
-        return nvidia.dispatch(opts, wrapHandler(handler));
+        return nvidia.dispatch(opts, wrapHandler(handler, proxyUrl, onObserved, onDiagnostic, options.onProxyError));
       }
       return fallback.dispatch(opts, handler);
     },
@@ -234,12 +288,15 @@ export interface DispatcherDeps {
   getGlobalDispatcher(): unknown;
   setGlobalDispatcher(dispatcher: unknown): void;
   createProxyAgent(url: URL): DispatchTarget;
+  /** Необязательный адаптер: превращает утиную обёртку в объект, который можно поставить глобальным диспетчером (например, подкласс реального `undici.Dispatcher`). Маркер должен сохраниться. */
+  adapt?: (duck: SelectiveDispatcherHandle) => unknown;
 }
 
 export interface InstallOptions {
   proxyUrl: URL;
   onObserved?: (status: number, headers: Record<string, string>) => void;
   onDiagnostic?: (diagnostic: NimDiagnostic) => void;
+  onProxyError?: (message: string, cause: unknown) => void;
 }
 
 export interface InstallResult {
@@ -257,13 +314,15 @@ export function ensureDispatcherInstalled(deps: DispatcherDeps, options: Install
   const current = deps.getGlobalDispatcher();
   if (isOurDispatcher(current)) return { installed: false, already: true, dispatcher: current };
   const proxyAgent = deps.createProxyAgent(options.proxyUrl);
-  const dispatcher = createSelectiveDispatcher({
+  const duck = createSelectiveDispatcher({
     nvidia: proxyAgent,
     fallback: current as DispatchTarget,
     proxyUrl: options.proxyUrl.toString(),
     onObserved: options.onObserved,
     onDiagnostic: options.onDiagnostic,
+    onProxyError: options.onProxyError,
   });
+  const dispatcher = deps.adapt ? deps.adapt(duck) : duck;
   deps.setGlobalDispatcher(dispatcher);
   return { installed: true, already: false, dispatcher };
 }
