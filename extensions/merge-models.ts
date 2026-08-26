@@ -146,8 +146,10 @@ export interface ApplyOutcome {
   changed: boolean;
   conflicts: Conflict[];
   summary: MergeSummary;
-  /** Леджер только применённых в этот раз записей; сливается с предыдущим в `store`. */
+  /** Полный леджер после применения (применённые + сохранённые записи). */
   state: OwnedState;
+  /** Устаревшие записи (убраны из оверрайд-файла), удалённые при применении. */
+  pruned: string[];
 }
 
 function detectConflicts(target: ModelsJson, desired: ModelsJson, ledger: OwnedState | undefined): Conflict[] {
@@ -233,6 +235,10 @@ function stripConflicts(desired: ModelsJson, conflicts: Conflict[]): ModelsJson 
  * Применение желаемых оверрайдов к целевому `models.json` с детекцией конфликтов.
  * `overwrite: true` — конфликтные записи перезаписываются (явное владение);
  * `overwrite: false` — пропускаются (пользовательские правки не трогаются).
+ *
+ * Записи, убраные из оверрайд-файла после применения (устаревшие), удаляются из
+ * цели, если совпадают с леджером; изменённые пользователем остаются и в цели,
+ * и в леджере. Возвращаемый `state` — полный леджер после применения.
  */
 export function applyOverrides(
   target: ModelsJson,
@@ -244,8 +250,74 @@ export function applyOverrides(
   const conflicts = detectConflicts(target, desired, ledger);
   const effective = overwrite ? desired : stripConflicts(desired, conflicts);
   const { merged, summary } = mergeModelsJson(target, effective);
+  const { state, pruned } = finalizeOwnedState(merged, effective, desired, ledger);
+  return { merged, changed: !deepEqual(merged, target), conflicts, summary, state, pruned };
+}
+
+/**
+ * Полный леджер после применения: применённые записи + записи леджера, которые
+ * остаются нашими (пропущенные из-за конфликтов; устаревшие, но изменённые
+ * пользователем). Устаревшие записи, совпадающие с леджером, удаляются из `merged`.
+ */
+function finalizeOwnedState(
+  merged: ModelsJson,
+  effective: ModelsJson,
+  desired: ModelsJson,
+  ledger: OwnedState | undefined,
+): { state: OwnedState; pruned: string[] } {
   const state = buildOwnedState(effective);
-  return { merged, changed: !deepEqual(merged, target), conflicts, summary, state };
+  const pruned: string[] = [];
+
+  for (const [providerId, stateProvider] of Object.entries(ledger?.providers ?? {})) {
+    const final = state.providers[providerId] ?? { modelOverrides: {}, models: {} };
+    const desiredProvider = desired.providers?.[providerId];
+    const mergedProvider = merged.providers?.[providerId];
+
+    for (const [modelId, ledgerValue] of Object.entries(stateProvider.modelOverrides ?? {})) {
+      if (final.modelOverrides[modelId] !== undefined) continue;
+      if (desiredProvider?.modelOverrides?.[modelId] !== undefined) {
+        // В оверрайд-файле есть, но не применилась (конфликт без force) — остаётся нашей.
+        final.modelOverrides[modelId] = clone(ledgerValue);
+        continue;
+      }
+      // Устарела: убрана из оверрайд-файла.
+      const current = mergedProvider?.modelOverrides?.[modelId];
+      if (current !== undefined && deepEqual(current, ledgerValue)) {
+        delete mergedProvider!.modelOverrides![modelId];
+        if (Object.keys(mergedProvider!.modelOverrides!).length === 0) delete mergedProvider!.modelOverrides;
+        pruned.push(`${providerId}/modelOverrides/${modelId}`);
+      } else if (current !== undefined) {
+        final.modelOverrides[modelId] = clone(ledgerValue); // изменена пользователем — не трогаем
+      }
+    }
+
+    for (const [modelId, ledgerValue] of Object.entries(stateProvider.models ?? {})) {
+      if (final.models[modelId] !== undefined) continue;
+      if (desiredProvider?.models?.some((m) => m.id === modelId)) {
+        final.models[modelId] = clone(ledgerValue);
+        continue;
+      }
+      const models = mergedProvider?.models;
+      const index = Array.isArray(models) ? models.findIndex((m) => m.id === modelId) : -1;
+      if (index >= 0 && deepEqual(models![index], ledgerValue)) {
+        models!.splice(index, 1);
+        if (models!.length === 0) delete mergedProvider!.models;
+        pruned.push(`${providerId}/models/${modelId}`);
+      } else if (index >= 0) {
+        final.models[modelId] = clone(ledgerValue); // изменена пользователем — не трогаем
+      }
+    }
+
+    if (Object.keys(final.modelOverrides).length > 0 || Object.keys(final.models).length > 0) {
+      state.providers[providerId] = final;
+    }
+    // Пустой провайдер в цели после чистки — убираем.
+    if (mergedProvider && merged.providers && Object.keys(mergedProvider).length === 0) {
+      delete merged.providers[providerId];
+    }
+  }
+
+  return { state, pruned };
 }
 
 function buildOwnedState(desired: ModelsJson): OwnedState {

@@ -126,6 +126,27 @@ assert.ok(defaults.modelsJson.endsWith(join(".pi", "agent", "models.json")), "д
   assert.equal(result.changed, false);
 }
 
+// 5a. Запись, убраная из оверрайд-файла, удаляется из models.json при следующем применении.
+{
+  const base = freshDir("prune-stale");
+  const overridesFile = join(base, "overrides.json");
+  writeOverrides(overridesFile);
+  const p = storePaths(base, overridesFile);
+
+  applyFiles(true, p);
+  writeFileSync(
+    overridesFile,
+    JSON.stringify({ providers: { nvidia: { modelOverrides: { "minimaxai/minimax-m3": { reasoning: true } } } } }),
+    "utf8",
+  );
+  const pruned = applyFiles(false, p);
+  assert.deepEqual(pruned.pruned, ["nvidia/models/moonshotai/kimi-k3"], "устаревшая запись не названа");
+  assert.ok(!readModels(p).providers.nvidia.models?.some((m: any) => m.id === "moonshotai/kimi-k3"),
+    "устаревшая модель осталась в models.json");
+  assert.ok(loadState(p)?.providers.nvidia.models["moonshotai/kimi-k3"] === undefined,
+    "устаревшая запись осталась в леджере");
+}
+
 // 6. Оверрайд-файл с чужим провайдером отклоняется.
 {
   const base = freshDir("foreign");

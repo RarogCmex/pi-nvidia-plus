@@ -15,7 +15,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   applyOverrides,
-  mergeOwnedStates,
   rollbackOverrides,
   validateOverrides,
   type Conflict,
@@ -87,6 +86,8 @@ export interface ApplyFilesResult {
   changed: boolean;
   conflicts: Conflict[];
   summary: MergeSummary;
+  /** Устаревшие записи, удалённые при применении (убраны из оверрайд-файла). */
+  pruned: string[];
 }
 
 /**
@@ -104,8 +105,8 @@ export function applyFiles(overwrite: boolean, paths: StorePaths = storePaths())
     backupModelsJson(paths);
     writeJson(paths.modelsJson, outcome.merged);
   }
-  writeJson(paths.stateFile, mergeOwnedStates(ledger, outcome.state));
-  return { changed: outcome.changed, conflicts: outcome.conflicts, summary: outcome.summary };
+  writeJson(paths.stateFile, { ...outcome.state, enabled: true });
+  return { changed: outcome.changed, conflicts: outcome.conflicts, summary: outcome.summary, pruned: outcome.pruned };
 }
 
 export interface RollbackFilesResult {

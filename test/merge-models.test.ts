@@ -187,4 +187,46 @@ assert.equal(
 const emptyLedger: OwnedState = { version: 1, appliedAt: "x", providers: {} };
 assert.equal(rollbackOverrides(once, emptyLedger).changed, false);
 
+// 16. Запись, убранная из оверрайд-файла, удаляется при следующем применении,
+// если она совпадает с леджером (пользовательскую версию не трогаем).
+{
+  // Было применено две записи; затем оверрайд-файл потерял модель.
+  const desiredShrunk: ModelsJson = {
+    providers: {
+      nvidia: {
+        modelOverrides: source.providers?.nvidia.modelOverrides,
+        // models[] больше нет — запись должна уйти из target
+      },
+    },
+  };
+  const withModel = applyOverrides(target, source, undefined, true);
+  const afterShrink = applyOverrides(withModel.merged, desiredShrunk, withModel.state, false);
+  assert.ok(afterShrink.changed, "удаление устаревшей записи не помечено изменением");
+  assert.ok(
+    !afterShrink.merged.providers?.nvidia?.models?.some((m) => m.id === "moonshotai/kimi-k3"),
+    "устаревшая модель не удалена",
+  );
+  assert.equal(afterShrink.state.providers.nvidia.models["moonshotai/kimi-k3"], undefined,
+    "устаревшая запись осталась в леджере");
+  assert.ok(afterShrink.merged.providers?.nvidia?.modelOverrides?.["minimaxai/minimax-m3"],
+    "актуальная запись задета чисткой");
+  // Чужая модель того же провайдера не задета.
+  assert.ok(afterShrink.merged.providers?.nvidia?.models?.some((m) => m.id === "some/custom-model"),
+    "чужая модель удалена чисткой");
+}
+
+// 16a. Устаревшая запись, изменённая пользователем после применения, не удаляется.
+{
+  const withModel = applyOverrides(target, source, undefined, true);
+  const editedByUser = JSON.parse(JSON.stringify(withModel.merged)) as ModelsJson;
+  const idx = editedByUser.providers!.nvidia.models!.findIndex((m) => m.id === "moonshotai/kimi-k3");
+  editedByUser.providers!.nvidia.models![idx] = { id: "moonshotai/kimi-k3", contextWindow: 1 };
+  const desiredShrunk: ModelsJson = { providers: { nvidia: { modelOverrides: source.providers?.nvidia.modelOverrides } } };
+  const kept = applyOverrides(editedByUser, desiredShrunk, withModel.state, false);
+  assert.ok(kept.merged.providers?.nvidia?.models?.some((m) => m.id === "moonshotai/kimi-k3"),
+    "изменённая пользователем устаревшая запись удалена");
+  assert.ok(kept.state.providers.nvidia.models["moonshotai/kimi-k3"],
+    "изменённая устаревшая запись не осталась в леджере");
+}
+
 console.log("merge-models: все проверки прошли");
