@@ -1,0 +1,21 @@
+{
+  "name": "pi-nvidia-plus",
+  "version": "0.0.1",
+  "description": "Улучшает встроенный провайдер nvidia на месте (спайк тикета 05: хук-онли + оверрайды в формате models.json)",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/pi-nvidia-plus.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node test/merge-models.test.ts"
+  }
+}

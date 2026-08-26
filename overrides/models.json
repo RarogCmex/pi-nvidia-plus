@@ -1,0 +1,54 @@
+{
+  "providers": {
+    "nvidia": {
+      "modelOverrides": {
+        "minimaxai/minimax-m3": {
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "disabled",
+            "minimal": "adaptive",
+            "low": "adaptive",
+            "medium": "adaptive",
+            "high": "enabled",
+            "xhigh": "enabled",
+            "max": "enabled"
+          }
+        },
+        "nvidia/nemotron-3-super-120b-a12b": {
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "off",
+            "minimal": "low",
+            "low": "low",
+            "medium": "on",
+            "high": "on",
+            "xhigh": "on",
+            "max": "on"
+          }
+        },
+        "nvidia/nemotron-3.5-lightning-30b-a3b": {
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "off",
+            "minimal": "low",
+            "low": "low",
+            "medium": "on",
+            "high": "on",
+            "xhigh": "on",
+            "max": "on"
+          }
+        }
+      },
+      "models": [
+        {
+          "id": "moonshotai/kimi-k3",
+          "name": "Kimi K3",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 1048576,
+          "maxTokens": 131072
+        }
+      ]
+    }
+  }
+}
