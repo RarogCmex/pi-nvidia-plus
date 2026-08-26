@@ -52,6 +52,7 @@ const DEAD_MODELS: Record<string, string> = {
   "mistralai/mistral-7b-instruct-v0.3": "404 in all probes",
   "moonshotai/kimi-k2.6": "404 in all probes",
   "nvidia/cosmos-reason2-8b": "404 in all probes",
+  "nvidia/llama-3.1-nemotron-70b-instruct": "404 in all probes (re-check ticket 08)",
   "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in all probes",
 };
 
