@@ -44,6 +44,8 @@ export interface OwnedProviderState {
 export interface OwnedState {
   version: 1;
   appliedAt: string;
+  /** `false` — автоприменение выключено (например, после `/nvidia-plus-rollback`). */
+  enabled?: boolean;
   providers: Record<string, OwnedProviderState>;
 }
 
@@ -144,18 +146,11 @@ export interface ApplyOutcome {
   changed: boolean;
   conflicts: Conflict[];
   summary: MergeSummary;
+  /** Леджер только применённых в этот раз записей; сливается с предыдущим в `store`. */
   state: OwnedState;
 }
 
-/**
- * Применение желаемых оверрайдов к целевому `models.json` с детекцией конфликтов.
- * Конфликты не блокируют применение (мы владеем своими `id`), но сообщают,
- * что перезаписана чужая/изменённая запись.
- */
-export function applyOverrides(target: ModelsJson, desired: ModelsJson, ledger: OwnedState | undefined): ApplyOutcome {
-  validateOverrides(desired);
-  const { merged, summary } = mergeModelsJson(target, desired);
-
+function detectConflicts(target: ModelsJson, desired: ModelsJson, ledger: OwnedState | undefined): Conflict[] {
   const conflicts: Conflict[] = [];
   for (const [providerId, prov] of Object.entries(desired.providers ?? {})) {
     const currentProvider = target.providers?.[providerId];
@@ -170,14 +165,14 @@ export function applyOverrides(target: ModelsJson, desired: ModelsJson, ledger: 
           providerId,
           kind: "modelOverride",
           modelId,
-          reason: "pre-existing entry differs; overwritten by pi-nvidia-plus",
+          reason: "pre-existing entry differs",
         });
       } else if (!deepEqual(current, appliedBefore)) {
         conflicts.push({
           providerId,
           kind: "modelOverride",
           modelId,
-          reason: "entry was edited after last apply; overwritten by pi-nvidia-plus",
+          reason: "entry was edited after last apply",
         });
       }
     }
@@ -191,20 +186,65 @@ export function applyOverrides(target: ModelsJson, desired: ModelsJson, ledger: 
           providerId,
           kind: "model",
           modelId: model.id,
-          reason: "pre-existing entry differs; overwritten by pi-nvidia-plus",
+          reason: "pre-existing entry differs",
         });
       } else if (!deepEqual(current, appliedBefore)) {
         conflicts.push({
           providerId,
           kind: "model",
           modelId: model.id,
-          reason: "entry was edited after last apply; overwritten by pi-nvidia-plus",
+          reason: "entry was edited after last apply",
         });
       }
     }
   }
+  return conflicts;
+}
 
-  const state = buildOwnedState(desired);
+function stripConflicts(desired: ModelsJson, conflicts: Conflict[]): ModelsJson {
+  if (conflicts.length === 0) return desired;
+  const blocked = new Map<string, Set<string>>();
+  for (const c of conflicts) {
+    const key = `${c.providerId}\u0000${c.kind}`;
+    if (!blocked.has(key)) blocked.set(key, new Set());
+    blocked.get(key)!.add(c.modelId);
+  }
+  const filtered: ModelsJson = { providers: {} };
+  for (const [providerId, prov] of Object.entries(desired.providers ?? {})) {
+    const out: ProviderEntry = {};
+    const blockedOverrides = blocked.get(`${providerId}\u0000modelOverride`);
+    for (const [id, value] of Object.entries(prov.modelOverrides ?? {})) {
+      if (blockedOverrides?.has(id)) continue;
+      out.modelOverrides = out.modelOverrides ?? {};
+      out.modelOverrides[id] = value;
+    }
+    const blockedModels = blocked.get(`${providerId}\u0000model`);
+    for (const model of prov.models ?? []) {
+      if (blockedModels?.has(model.id)) continue;
+      out.models = out.models ?? [];
+      out.models.push(model);
+    }
+    if (out.modelOverrides || out.models) filtered.providers![providerId] = out;
+  }
+  return filtered;
+}
+
+/**
+ * Применение желаемых оверрайдов к целевому `models.json` с детекцией конфликтов.
+ * `overwrite: true` — конфликтные записи перезаписываются (явное владение);
+ * `overwrite: false` — пропускаются (пользовательские правки не трогаются).
+ */
+export function applyOverrides(
+  target: ModelsJson,
+  desired: ModelsJson,
+  ledger: OwnedState | undefined,
+  overwrite: boolean,
+): ApplyOutcome {
+  validateOverrides(desired);
+  const conflicts = detectConflicts(target, desired, ledger);
+  const effective = overwrite ? desired : stripConflicts(desired, conflicts);
+  const { merged, summary } = mergeModelsJson(target, effective);
+  const state = buildOwnedState(effective);
   return { merged, changed: !deepEqual(merged, target), conflicts, summary, state };
 }
 
@@ -221,6 +261,24 @@ function buildOwnedState(desired: ModelsJson): OwnedState {
     providers[providerId] = entry;
   }
   return { version: 1, appliedAt: new Date().toISOString(), providers };
+}
+
+/** Сливает применённые записи с предыдущим леджером (апсерт по `id`). */
+export function mergeOwnedStates(previous: OwnedState | undefined, applied: OwnedState): OwnedState {
+  const providers: Record<string, OwnedProviderState> = {};
+  const ids = new Set([...Object.keys(previous?.providers ?? {}), ...Object.keys(applied.providers ?? {})]);
+  for (const providerId of ids) {
+    const prev = previous?.providers[providerId];
+    const next = applied.providers?.[providerId];
+    const entry: OwnedProviderState = {
+      modelOverrides: { ...(prev?.modelOverrides ?? {}), ...(next?.modelOverrides ?? {}) },
+      models: { ...(prev?.models ?? {}), ...(next?.models ?? {}) },
+    };
+    if (Object.keys(entry.modelOverrides).length > 0 || Object.keys(entry.models).length > 0) {
+      providers[providerId] = entry;
+    }
+  }
+  return { version: 1, appliedAt: applied.appliedAt, enabled: true, providers };
 }
 
 export interface RollbackOutcome {

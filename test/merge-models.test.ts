@@ -7,6 +7,7 @@ import {
   applyOverrides,
   deepEqual,
   mergeModelsJson,
+  mergeOwnedStates,
   rollbackOverrides,
   type ModelsJson,
   type OwnedState,
@@ -95,23 +96,57 @@ assert.ok(!deepEqual({ a: 1 }, { a: 2 }));
 assert.ok(!deepEqual({ a: 1 }, { a: 1, b: 2 }));
 assert.ok(!deepEqual([1, 2], [2, 1]));
 
-// 10. applyOverrides: первое применение без леджера — конфликт на чужую запись.
-const firstApply = applyOverrides(target, source, undefined);
+// 10. applyOverrides: первое применение без леджера, `overwrite: true` — конфликт и перезапись.
+const firstApply = applyOverrides(target, source, undefined, true);
 assert.equal(firstApply.conflicts.length, 1, "ожидался один конфликт (чужая запись на нашем id)");
 assert.equal(firstApply.conflicts[0].modelId, "minimaxai/minimax-m3");
 assert.ok(firstApply.changed);
+assert.deepEqual(
+  firstApply.merged.providers?.nvidia.modelOverrides?.["minimaxai/minimax-m3"],
+  source.providers?.nvidia.modelOverrides?.["minimaxai/minimax-m3"],
+  "при overwrite конфликтная запись не перезаписана",
+);
+
+// 10a. applyOverrides: `overwrite: false` — конфликтная запись пропускается, остальные применяются.
+const gentleApply = applyOverrides(target, source, undefined, false);
+assert.equal(gentleApply.conflicts.length, 1, "конфликт не обнаружен в мягком режиме");
+assert.deepEqual(
+  gentleApply.merged.providers?.nvidia.modelOverrides?.["minimaxai/minimax-m3"],
+  { reasoning: false },
+  "мягкий режим перезаписал пользовательскую запись",
+);
+assert.ok(
+  gentleApply.merged.providers?.nvidia.models?.some((m) => m.id === "moonshotai/kimi-k3"),
+  "мягкий режим не применил бесконфликтную запись",
+);
+assert.equal(gentleApply.state.providers.nvidia.modelOverrides["minimaxai/minimax-m3"], undefined,
+  "пропущенная запись попала в леджер применённых");
 
 // 11. applyOverrides: повторное применение по леджеру — конфликтов нет.
-const secondApply = applyOverrides(firstApply.merged, source, firstApply.state);
+const secondApply = applyOverrides(firstApply.merged, source, firstApply.state, true);
 assert.equal(secondApply.conflicts.length, 0, "повторное применение даёт конфликты");
 assert.equal(secondApply.changed, false, "повторное применение меняет models.json");
 
-// 12. applyOverrides: пользовательская правка после применения — конфликт.
+// 12. applyOverrides: пользовательская правка после применения.
+// overwrite: true — конфликт с перезаписью; overwrite: false — пропуск.
 const userEdited: ModelsJson = JSON.parse(JSON.stringify(firstApply.merged));
 userEdited.providers!.nvidia.modelOverrides!["minimaxai/minimax-m3"] = { reasoning: true, contextWindow: 123 };
-const conflictApply = applyOverrides(userEdited, source, firstApply.state);
+const conflictApply = applyOverrides(userEdited, source, firstApply.state, true);
 assert.equal(conflictApply.conflicts.length, 1, "пользовательская правка не обнаружена");
 assert.match(conflictApply.conflicts[0].reason, /edited after last apply/);
+const conflictGentle = applyOverrides(userEdited, source, firstApply.state, false);
+assert.deepEqual(
+  conflictGentle.merged.providers?.nvidia.modelOverrides?.["minimaxai/minimax-m3"],
+  { reasoning: true, contextWindow: 123 },
+  "мягкий режим затёр пользовательскую правку",
+);
+
+// 12a. mergeOwnedStates: леджер накапливает записи между применениями.
+const mergedStates = mergeOwnedStates(firstApply.state, secondApply.state);
+assert.ok(mergedStates.providers.nvidia.modelOverrides["minimaxai/minimax-m3"], "леджер потерял запись");
+assert.equal(mergedStates.enabled, true);
+const mergedWithEmpty = mergeOwnedStates(undefined, secondApply.state);
+assert.ok(mergedWithEmpty.providers.nvidia.models["moonshotai/kimi-k3"], "мерж с пустым предыдущим леджером сломан");
 
 // 13. rollbackOverrides: удаляет только записи из леджера, совпадающие с текущими;
 // чужие записи того же провайдера остаются.

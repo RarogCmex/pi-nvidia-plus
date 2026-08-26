@@ -26,7 +26,7 @@ import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { applyFiles, rollbackFiles, MODELS_JSON, STATE_FILE } from "./store.ts";
+import { applyFiles, loadState, rollbackFiles, MODELS_JSON, STATE_FILE } from "./store.ts";
 
 const PROVIDER = "nvidia";
 const DEBUG = process.env.PI_NVIDIA_PLUS_DEBUG === "1";
@@ -178,6 +178,49 @@ function statusLine(ctx: ExtensionContext): string | undefined {
 }
 
 export default function piNvidiaPlus(pi: ExtensionAPI): void {
+  // ── Автоприменение оверрайдов (вариант «b», тикет 05) ──────────────────
+  // Хука на чтение models.json в пи нет. Применяем на загрузке расширения —
+  // пи перечитывает конфиг встроенным `refresh()` сразу после загрузки
+  // расширений, поэтому оверрайды подхватываются уже в первой сессии.
+  // `session_start` досвечивает результат и повторяет попытку при сбое.
+  // Политика: пользовательские правки никогда не перезаписываются без `force`.
+  let factoryApplied = false;
+  try {
+    if (loadState()?.enabled !== false) {
+      factoryApplied = applyFiles(false).changed;
+    }
+  } catch {
+    // session_start повторит и сообщит об ошибке.
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      if (loadState()?.enabled === false) return; // погашено откатом
+      const result = applyFiles(false);
+      if (result.changed) {
+        await ctx.modelRegistry.refresh({ allowNetwork: false });
+      }
+      if (!ctx.hasUI) return;
+      if (result.changed || factoryApplied) {
+        ctx.ui.notify(
+          `pi-nvidia-plus: auto-applied ${result.summary.overrideIds.length} modelOverrides + ${result.summary.modelIds.length} models (ledger: nvidia-plus-models.json)`,
+          "info",
+        );
+      }
+      factoryApplied = false;
+      for (const conflict of result.conflicts) {
+        ctx.ui.notify(
+          `pi-nvidia-plus: skipped ${conflict.providerId}/${conflict.modelId} (${conflict.kind}) — ${conflict.reason}; run "/nvidia-plus-apply force" to overwrite`,
+          "warning",
+        );
+      }
+    } catch (e) {
+      if (ctx.hasUI) {
+        ctx.ui.notify(`pi-nvidia-plus: auto-apply failed — ${e instanceof Error ? e.message : String(e)}`, "error");
+      }
+    }
+  });
+
   // ── Интерактивная статус-строка: выбор модели и смена уровня ─────────────
   pi.on("model_select", (event, ctx) => {
     if (!ctx.hasUI) return;
@@ -255,22 +298,29 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
 
   // ── (4) Метаданные — данными: применение/откат оверрайдов ────────────────
   pi.registerCommand("nvidia-plus-apply", {
-    description: "Apply pi-nvidia-plus overrides to models.json (own ids only; ledger in nvidia-plus-models.json)",
-    handler: async (_args, ctx) => {
+    description: "Apply pi-nvidia-plus overrides to models.json (own ids only; 'force' overwrites conflicting entries)",
+    handler: async (args, ctx) => {
       try {
-        const result = applyFiles();
+        const force = /\bforce\b/i.test(args ?? "");
+        const result = applyFiles(force);
         for (const conflict of result.conflicts) {
           ctx.ui.notify(
-            `pi-nvidia-plus conflict: ${conflict.providerId}/${conflict.modelId} (${conflict.kind}) — ${conflict.reason}`,
+            `pi-nvidia-plus conflict: ${conflict.providerId}/${conflict.modelId} (${conflict.kind}) — ${conflict.reason}${force ? "; overwritten" : "; skipped, rerun with \"force\" to overwrite"}`,
             "warning",
           );
         }
-        if (!result.changed) {
-          ctx.ui.notify("pi-nvidia-plus: models.json already up to date.", "info");
+        if (result.changed) {
+          await ctx.modelRegistry.refresh({ allowNetwork: false });
+          ctx.ui.notify(
+            `pi-nvidia-plus: applied ${result.summary.overrideIds.length} modelOverrides + ${result.summary.modelIds.length} models to ${MODELS_JSON} (ledger: ${STATE_FILE}). Reopen /model to reload.`,
+            "info",
+          );
           return;
         }
         ctx.ui.notify(
-          `pi-nvidia-plus: applied ${result.summary.overrideIds.length} modelOverrides + ${result.summary.modelIds.length} models to ${MODELS_JSON} (ledger: ${STATE_FILE}). Reopen /model to reload.`,
+          result.conflicts.length > 0
+            ? "pi-nvidia-plus: nothing applied — all pending entries conflict (use \"force\" to overwrite)."
+            : "pi-nvidia-plus: models.json already up to date.",
           "info",
         );
       } catch (e) {
@@ -294,12 +344,15 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             "warning",
           );
         }
-        ctx.ui.notify(
-          result.changed
-            ? `pi-nvidia-plus: removed ${result.removed.length} entries from models.json. Reopen /model to reload.`
-            : "pi-nvidia-plus: models.json already clean.",
-          "info",
-        );
+        if (result.changed) {
+          await ctx.modelRegistry.refresh({ allowNetwork: false });
+          ctx.ui.notify(
+            `pi-nvidia-plus: removed ${result.removed.length} entries from models.json; auto-apply disabled until next apply. Reopen /model to reload.`,
+            "info",
+          );
+          return;
+        }
+        ctx.ui.notify("pi-nvidia-plus: models.json already clean; auto-apply disabled.", "info");
       } catch (e) {
         ctx.ui.notify(`pi-nvidia-plus: rollback failed — ${e instanceof Error ? e.message : String(e)}`, "error");
       }
@@ -310,10 +363,11 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   pi.registerCommand("nvidia-plus-status", {
     description: "nvidia: current model, thinking level and what the hook injects",
     handler: async (_args, ctx) => {
+      const auto = loadState()?.enabled === false ? "auto-apply disabled" : "auto-apply on";
       const model = ctx.model;
       if (!model || model.provider !== PROVIDER) {
         ctx.ui.notify(
-          `pi-nvidia-plus: current model is not nvidia (${model ? `${model.provider}/${model.id}` : "none"})`,
+          `pi-nvidia-plus (${auto}): current model is not nvidia (${model ? `${model.provider}/${model.id}` : "none"})`,
           "info",
         );
         return;
@@ -321,7 +375,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const level = ctx.thinkingLevel;
       const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
       ctx.ui.notify(
-        `pi-nvidia-plus: ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
+        `pi-nvidia-plus (${auto}): ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
         "info",
       );
     },

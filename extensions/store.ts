@@ -9,12 +9,13 @@
  *    чтобы не смешивать наши записи с пользовательскими;
  *  - перед каждой записью `models.json` создаётся бэкап `*.bak-pi-nvidia-plus`.
  */
-import { copyFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   applyOverrides,
+  mergeOwnedStates,
   rollbackOverrides,
   validateOverrides,
   type Conflict,
@@ -68,18 +69,22 @@ export interface ApplyFilesResult {
   summary: MergeSummary;
 }
 
-/** Применить оверрайды к `models.json` и обновить леджер. Идемпотентно. */
-export function applyFiles(): ApplyFilesResult {
+/**
+ * Применить оверрайды к `models.json` и обновить леджер. Идемпотентно.
+ * `overwrite: false` (автоприменение) — конфликтные записи пропускаются;
+ * `overwrite: true` (явная команда с `force`) — перезаписываются.
+ */
+export function applyFiles(overwrite: boolean): ApplyFilesResult {
   const desired = loadOverrides();
   const target = (readJson(MODELS_JSON) ?? {}) as ModelsJson;
   const ledger = loadState();
 
-  const outcome = applyOverrides(target, desired, ledger);
+  const outcome = applyOverrides(target, desired, ledger, overwrite);
   if (outcome.changed) {
     backupModelsJson();
     writeJson(MODELS_JSON, outcome.merged);
   }
-  writeJson(STATE_FILE, outcome.state);
+  writeJson(STATE_FILE, mergeOwnedStates(ledger, outcome.state));
   return { changed: outcome.changed, conflicts: outcome.conflicts, summary: outcome.summary };
 }
 
@@ -101,8 +106,11 @@ export function rollbackFiles(): RollbackFilesResult {
     backupModelsJson();
     writeJson(MODELS_JSON, outcome.merged);
   }
-  if (outcome.remainingState) writeJson(STATE_FILE, outcome.remainingState);
-  else if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE);
+  // Откат гасит автоприменение: леджер сохраняется с `enabled: false`,
+  // чтобы следующий `session_start` не вернул записи молча.
+  writeJson(STATE_FILE, outcome.remainingState
+    ? { ...outcome.remainingState, enabled: false }
+    : { version: 1, appliedAt: new Date().toISOString(), enabled: false, providers: {} });
 
   return { changed: outcome.changed, removed: outcome.removed, kept: outcome.kept, hadState: true };
 }
