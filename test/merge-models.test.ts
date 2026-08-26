@@ -1,9 +1,16 @@
 /**
- * Тесты чистого мержа оверрайдов (расширение: extensions/merge-models.ts).
+ * Тесты чистой логики владения оверрайдами (extensions/merge-models.ts).
  * Запуск: node test/merge-models.test.ts (Node ≥ 22.6, type stripping).
  */
 import assert from "node:assert/strict";
-import { mergeModelsJson, type ModelsJson } from "../extensions/merge-models.ts";
+import {
+  applyOverrides,
+  deepEqual,
+  mergeModelsJson,
+  rollbackOverrides,
+  type ModelsJson,
+  type OwnedState,
+} from "../extensions/merge-models.ts";
 
 // Фикстуры повторяют реальную ситуацию: у пользователя есть свой провайдер
 // (atomesus) и записи в nvidia, частью из которых расширение владеет.
@@ -81,5 +88,68 @@ assert.deepEqual(summary.modelIds, ["nvidia/moonshotai/kimi-k3"]);
 
 // 8. Невалидный оверрайд-файл отклоняется.
 assert.throws(() => mergeModelsJson(target, { providers: { nvidia: { models: [{ contextWindow: 1 }] } } } as unknown as ModelsJson));
+
+// 9. deepEqual: порядок ключей не важен, вложенность сравнивается.
+assert.ok(deepEqual({ a: 1, b: { c: [1, 2] } }, { b: { c: [1, 2] }, a: 1 }));
+assert.ok(!deepEqual({ a: 1 }, { a: 2 }));
+assert.ok(!deepEqual({ a: 1 }, { a: 1, b: 2 }));
+assert.ok(!deepEqual([1, 2], [2, 1]));
+
+// 10. applyOverrides: первое применение без леджера — конфликт на чужую запись.
+const firstApply = applyOverrides(target, source, undefined);
+assert.equal(firstApply.conflicts.length, 1, "ожидался один конфликт (чужая запись на нашем id)");
+assert.equal(firstApply.conflicts[0].modelId, "minimaxai/minimax-m3");
+assert.ok(firstApply.changed);
+
+// 11. applyOverrides: повторное применение по леджеру — конфликтов нет.
+const secondApply = applyOverrides(firstApply.merged, source, firstApply.state);
+assert.equal(secondApply.conflicts.length, 0, "повторное применение даёт конфликты");
+assert.equal(secondApply.changed, false, "повторное применение меняет models.json");
+
+// 12. applyOverrides: пользовательская правка после применения — конфликт.
+const userEdited: ModelsJson = JSON.parse(JSON.stringify(firstApply.merged));
+userEdited.providers!.nvidia.modelOverrides!["minimaxai/minimax-m3"] = { reasoning: true, contextWindow: 123 };
+const conflictApply = applyOverrides(userEdited, source, firstApply.state);
+assert.equal(conflictApply.conflicts.length, 1, "пользовательская правка не обнаружена");
+assert.match(conflictApply.conflicts[0].reason, /edited after last apply/);
+
+// 13. rollbackOverrides: удаляет только записи из леджера, совпадающие с текущими;
+// чужие записи того же провайдера остаются.
+const rollback = rollbackOverrides(secondApply.merged, firstApply.state);
+assert.ok(rollback.changed, "откат ничего не меняет");
+assert.equal(
+  rollback.merged.providers?.nvidia?.modelOverrides?.["minimaxai/minimax-m3"],
+  undefined,
+  "наш modelOverride не удалён",
+);
+assert.ok(
+  !rollback.merged.providers?.nvidia?.models?.some((m) => m.id === "moonshotai/kimi-k3"),
+  "наша модель не удалена",
+);
+assert.deepEqual(
+  rollback.merged.providers?.nvidia?.modelOverrides?.["openai/gpt-oss-20b"],
+  { contextWindow: 999999 },
+  "чужой modelOverride удалён",
+);
+assert.deepEqual(rollback.merged.providers?.atomesus, target.providers?.atomesus, "чужой провайдер задет откатом");
+assert.equal(rollback.kept.length, 0);
+assert.equal(rollback.remainingState, undefined);
+
+// 14. rollbackOverrides: изменённая пользователем запись пропускается и остаётся в леджере.
+const editedForRollback: ModelsJson = JSON.parse(JSON.stringify(firstApply.merged));
+editedForRollback.providers!.nvidia.models![1] = { id: "moonshotai/kimi-k3", contextWindow: 1 };
+const partialRollback = rollbackOverrides(editedForRollback, firstApply.state);
+assert.ok(partialRollback.merged.providers?.nvidia?.models?.some((m) => m.id === "moonshotai/kimi-k3"), "изменённая запись удалена");
+assert.equal(partialRollback.kept.length, 1, "изменённая запись не попала в kept");
+assert.ok(partialRollback.remainingState?.providers.nvidia.models["moonshotai/kimi-k3"], "kept-запись не сохранена в леджере");
+assert.equal(
+  partialRollback.merged.providers?.nvidia?.modelOverrides?.["minimaxai/minimax-m3"],
+  undefined,
+  "совпадающая запись не удалена при откате",
+);
+
+// 15. rollback с пустым леджером ничего не делает (защита вызывающего кода).
+const emptyLedger: OwnedState = { version: 1, appliedAt: "x", providers: {} };
+assert.equal(rollbackOverrides(once, emptyLedger).changed, false);
 
 console.log("merge-models: все проверки прошли");
