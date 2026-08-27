@@ -12,6 +12,12 @@ import {
   createSelectiveDispatcher,
   isOurDispatcher,
   ensureDispatcherInstalled,
+  bufferRequestBody,
+  resolveRetryDelayMs,
+  makeNvidiaRetryFunction,
+  buildRetryAgentOptions,
+  withTransparentRetry,
+  RETRYABLE_STATUSES,
 } from "../extensions/proxy.ts";
 
 // 1. parseProxyUrl
@@ -313,6 +319,191 @@ function makeTarget(name: string) {
   const wrapper = current as { dispatch(opts: unknown, handler: unknown): boolean };
   wrapper.dispatch({ origin: "https://example.com" }, {});
   assert.equal((prevGlobal.calls.length), 1, "прежний диспетчер не подключён как fallback");
+}
+
+// 11. bufferRequestBody: строки/байты/null проходят как есть (воспроизводимы),
+// асинхронно-итерируемые тела (то, что отдаёт fetch) буферизуются в байты.
+{
+  const asBytes = (b: unknown): string => Buffer.from(b as Uint8Array).toString("utf8");
+
+  assert.equal(await bufferRequestBody(undefined), undefined);
+  assert.equal(await bufferRequestBody(null), null);
+  assert.equal(await bufferRequestBody("строка"), "строка");
+  const bytes = new Uint8Array([1, 2, 3]);
+  assert.strictEqual(await bufferRequestBody(bytes), bytes);
+
+  async function* gen(): AsyncGenerator<Uint8Array> {
+    yield Buffer.from("привет, ");
+    yield Buffer.from("NIM");
+  }
+  const buffered = await bufferRequestBody(gen());
+  assert.ok(buffered instanceof Uint8Array, "итератор буферизуется в байты");
+  assert.equal(asBytes(buffered), "привет, NIM");
+
+  // объект с Symbol.asyncIterator тоже буферизуется (кусками-строками)
+  const iterable = {
+    async *[Symbol.asyncIterator]() {
+      yield "ab";
+      yield "cd";
+    },
+  };
+  assert.equal(asBytes(await bufferRequestBody(iterable)), "abcd");
+
+  // пустое итерируемое — пустые байты (не undefined: длина тела важна)
+  async function* empty(): AsyncGenerator<Uint8Array> {}
+  const emptyBuffered = await bufferRequestBody(empty());
+  assert.ok(emptyBuffered instanceof Uint8Array && (emptyBuffered as Uint8Array).length === 0);
+
+  // неитерируемый мусор не трогаем (пусть решает ундичи)
+  const odd = { strange: true };
+  assert.strictEqual(await bufferRequestBody(odd), odd);
+}
+
+// 12. resolveRetryDelayMs: retry-after-ms > retry-after (секунды и дата) > экспонента; кап.
+{
+  const cfg = { minDelayMs: 500, maxDelayMs: 30_000 };
+  const now = Date.UTC(2026, 7, 27, 12, 0, 0);
+
+  assert.equal(resolveRetryDelayMs({ "retry-after-ms": "1200" }, 1, cfg, now), 1200);
+  assert.equal(resolveRetryDelayMs({ "retry-after-ms": "1200", "retry-after": "99" }, 1, cfg, now), 1200, "retry-after-ms первичен");
+  assert.equal(resolveRetryDelayMs({ "retry-after": "7" }, 1, cfg, now), 7000);
+  assert.equal(resolveRetryDelayMs({ "retry-after": "Wed, 27 Aug 2026 12:00:05 GMT" }, 1, cfg, now), 5000, "HTTP-дата");
+  assert.equal(resolveRetryDelayMs({}, 1, cfg, now), 500, "экспонента: попытка 1");
+  assert.equal(resolveRetryDelayMs({}, 3, cfg, now), 2000, "экспонента: попытка 3");
+  assert.equal(resolveRetryDelayMs({ "retry-after-ms": "999999" }, 1, cfg, now), 30_000, "кап сверху");
+  assert.equal(resolveRetryDelayMs({ "retry-after-ms": "-5" }, 1, cfg, now), 0, "отрицательное — в ноль");
+}
+
+// 13. makeNvidiaRetryFunction: решение о повторе.
+{
+  type RetryCall = { attempt: number; status: number; delayMs: number };
+  const scheduled: RetryCall[] = [];
+  const config = {
+    maxRetries: 3,
+    minDelayMs: 10,
+    maxDelayMs: 100,
+    onRetryScheduled: (info: RetryCall) => scheduled.push(info),
+  };
+  const retry = makeNvidiaRetryFunction(config);
+  const nextTick = () => new Promise((r) => setTimeout(r, 50));
+
+  // 429 с заголовком — повтор без ошибки, событие запланировано, задержка из заголовка
+  let outcome: unknown = "unset";
+  retry({ statusCode: 429, headers: { "retry-after-ms": "20" } }, { state: { counter: 1 } }, (e) => { outcome = e; });
+  assert.equal(outcome, "unset", "повтор не мгновенный");
+  await nextTick();
+  assert.equal(outcome, null, "после задержки повтор разрешён");
+  assert.deepEqual(scheduled, [{ attempt: 1, status: 429, delayMs: 20 }]);
+
+  // 502 тоже повторяется (входит в список)
+  outcome = "unset";
+  retry({ statusCode: 502, headers: {} }, { state: { counter: 2 } }, (e) => { outcome = e; });
+  await nextTick();
+  assert.equal(outcome, null);
+  assert.equal(scheduled.length, 2);
+  assert.equal(scheduled[1].status, 502);
+
+  // исчерпание: счётчик выше лимита — ошибка пробрасывается сразу (повторяет уже пи)
+  const exhausted = { statusCode: 429, headers: {} };
+  retry(exhausted, { state: { counter: 4 } }, (e) => { outcome = e; });
+  assert.strictEqual(outcome, exhausted, "исчерпание пробрасывает ошибку без задержки");
+  assert.equal(scheduled.length, 2, "события при исчерпании нет");
+
+  // неповторяемый статус (404) — сразу ошибка, без таймера и события
+  const notFound = { statusCode: 404, headers: {} };
+  retry(notFound, { state: { counter: 1 } }, (e) => { outcome = e; });
+  assert.strictEqual(outcome, notFound);
+
+  // транспортная ошибка без статуса — сразу ошибка (их повторяет пи)
+  const conn = new Error("conn") as NodeJS.ErrnoException;
+  conn.code = "ECONNRESET";
+  retry(conn, { state: { counter: 1 } }, (e) => { outcome = e; });
+  assert.strictEqual(outcome, conn);
+  assert.equal(scheduled.length, 2);
+
+  // список статусов по умолчанию
+  assert.deepEqual([...RETRYABLE_STATUSES], [429, 500, 502, 503, 504]);
+}
+
+// 14. buildRetryAgentOptions: форма настроек для штатного повторителя ундичи.
+{
+  const config = { maxRetries: 3, minDelayMs: 10, maxDelayMs: 100 };
+  const opts = buildRetryAgentOptions(config) as Record<string, unknown>;
+  assert.equal(opts.maxRetries, 3);
+  assert.equal(opts.throwOnError, false, "при исчерпании хендлер получает настоящий ответ");
+  assert.deepEqual(opts.statusCodes, [429, 500, 502, 503, 504]);
+  assert.equal(typeof opts.retry, "function", "своя функция повтора (знает retry-after-ms)");
+  assert.ok(Array.isArray(opts.methods) && (opts.methods as string[]).includes("POST"), "POST повторяется");
+}
+
+// 15. withTransparentRetry: тело буферизуется, запрос уходит в повторитель, 
+// ошибки буферизации доходят до хендлера, close/destroy делегируются.
+{
+  const received: Array<{ opts: { body?: unknown }; handler: unknown }> = [];
+  const retryTarget = {
+    dispatch(opts: unknown, handler: unknown) { received.push({ opts: opts as { body?: unknown }, handler }); return true; },
+    close() { return Promise.resolve(); },
+    destroy() { return Promise.resolve(); },
+  };
+  const created: Array<{ agent: unknown; retryOptions: unknown }> = [];
+  const composed = withTransparentRetry(
+    { dispatch() { return true; } },
+    { maxRetries: 3, minDelayMs: 10, maxDelayMs: 100 },
+    { createRetryAgent: (agent, retryOptions) => { created.push({ agent, retryOptions }); return retryTarget; } },
+  );
+  assert.equal(created.length, 1, "повторитель создаётся один раз");
+
+  async function* gen(): AsyncGenerator<Uint8Array> { yield Buffer.from("{}"); }
+  const handler = {};
+  assert.equal(composed.dispatch({ origin: NVIDIA_ORIGIN, method: "POST", body: gen() }, handler), true);
+  assert.equal(received.length, 0, "буферизация асинхронна");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(received.length, 1);
+  assert.ok(received[0].opts.body instanceof Uint8Array, "тело буферизовано в байты");
+  assert.equal(Buffer.from(received[0].opts.body as Uint8Array).toString(), "{}");
+  assert.strictEqual(received[0].handler, handler, "хендлер не подменяется на этом уровне");
+  assert.equal((received[0].opts as { method?: string }).method, "POST", "остальные поля сохранены");
+
+  // ошибка буферизации доходит до хендлера
+  const badBody = { async *[Symbol.asyncIterator]() { throw new Error("плохое тело"); } };
+  const errors: unknown[] = [];
+  const errHandler = { onResponseError(_c: unknown, e: unknown) { errors.push(e); } };
+  composed.dispatch({ origin: NVIDIA_ORIGIN, body: badBody }, errHandler);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0] instanceof Error && (errors[0] as Error).message.includes("плохое тело"));
+}
+
+// 16. ensureDispatcherInstalled с повтором: nvidia-маршрут идёт через повторитель,
+// остальное — в прежний диспетчер.
+{
+  let current: unknown = makeTarget("prev-global");
+  const retryCalls: Array<{ opts: unknown; handler: unknown }> = [];
+  const retryTarget = makeTarget("retry-agent");
+  const result = ensureDispatcherInstalled(
+    {
+      getGlobalDispatcher: () => current,
+      setGlobalDispatcher: (d) => { current = d; },
+      createProxyAgent: (url) => makeTarget(`agent:${url}`),
+      createRetryAgent: (agent, retryOptions) => {
+        assert.ok(retryOptions, "настройки повторителя переданы");
+        return retryTarget;
+      },
+    },
+    {
+      proxyUrl: new URL("http://192.168.88.248:8870/"),
+      retry: { maxRetries: 3, minDelayMs: 10, maxDelayMs: 100 },
+    },
+  );
+  assert.equal(result.installed, true);
+
+  const wrapper = current as { dispatch(opts: unknown, handler: unknown): boolean };
+  wrapper.dispatch({ origin: NVIDIA_ORIGIN, body: "{}" }, {});
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(retryTarget.calls.length, 1, "nvidia-запрос прошёл через повторитель");
+
+  wrapper.dispatch({ origin: "https://example.com" }, {});
+  assert.equal(retryTarget.calls.length, 1, "не-nvidia мимо повторителя");
 }
 
 console.log("proxy: все проверки прошли");

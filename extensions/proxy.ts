@@ -141,6 +141,157 @@ export interface DispatchTarget {
   dispatch(opts: unknown, handler: unknown): boolean;
 }
 
+/* ------------------------------------------------------------------ */
+/* Прозрачный транспортный повтор 429/5xx (тикет 14)                     */
+/* ------------------------------------------------------------------ */
+
+/** Статусы, которые повторяем на транспортном уровне без изменения контекста. */
+export const RETRYABLE_STATUSES: readonly number[] = [429, 500, 502, 503, 504];
+
+export interface TransportRetryConfig {
+  /** Повторы сверх первой попытки. */
+  maxRetries: number;
+  /** Стартовая задержка экспоненциального отката, мс. */
+  minDelayMs: number;
+  /** Потолок задержки (в том числе для `retry-after`), мс. */
+  maxDelayMs: number;
+  /** Статусы для повтора (по умолчанию `RETRYABLE_STATUSES`). */
+  statusCodes?: readonly number[];
+  /** Вызывается при каждом запланированном повторе. */
+  onRetryScheduled?: (info: { attempt: number; status: number; delayMs: number }) => void;
+}
+
+/**
+ * Тело запроса в воспроизводимом виде. `fetch` передаёт одноразовый асинхронный
+ * итератор; штатный повторитель ундичи не может его переиспользовать (помечает
+ * «использованным» после первого прохода). Строки и байты воспроизводимы сами,
+ * итераторы буферизуем в байты. Тела запросов NIM — небольшие JSON, буферизация
+ * безвредна.
+ */
+export async function bufferRequestBody(body: unknown): Promise<unknown> {
+  if (body === undefined || body === null) return body;
+  if (typeof body === "string" || ArrayBuffer.isView(body)) return body;
+  if (typeof (body as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] !== "function") return body;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of body as AsyncIterable<Uint8Array | string>) {
+    const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk);
+    chunks.push(bytes);
+    total += bytes.length;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/**
+ * Задержка перед повтором: `retry-after-ms` (заголовок NIM) > `retry-after`
+ * (секунды или HTTP-дата) > экспоненциальный откат; всегда в пределах `[0, maxDelayMs]`.
+ */
+export function resolveRetryDelayMs(
+  headers: Record<string, string>,
+  attempt: number,
+  config: { minDelayMs: number; maxDelayMs: number },
+  now: number = Date.now(),
+): number {
+  const clamp = (value: number): number => Math.max(0, Math.min(value, config.maxDelayMs));
+  const ms = headers["retry-after-ms"];
+  if (ms !== undefined) {
+    const value = Number.parseFloat(ms);
+    if (Number.isFinite(value)) return clamp(value);
+  }
+  const raw = headers["retry-after"];
+  if (raw !== undefined) {
+    const seconds = Number.parseFloat(raw);
+    if (!Number.isNaN(seconds)) return clamp(seconds * 1000);
+    const date = Date.parse(raw);
+    if (!Number.isNaN(date)) return clamp(date - now);
+  }
+  return clamp(config.minDelayMs * 2 ** Math.max(0, attempt - 1));
+}
+
+export interface RetryDecisionContext {
+  state: { counter: number };
+}
+
+/**
+ * Своя функция решения о повторе для штатного повторителя ундичи. Штатная не знает
+ * `retry-after-ms` и по умолчанию не повторяет `POST`. Транспортные ошибки (без статуса)
+ * не повторяем — их повторяет сам пи, а прокси-ошибки должны показываться сразу.
+ */
+export function makeNvidiaRetryFunction(
+  config: TransportRetryConfig,
+): (err: unknown, context: RetryDecisionContext, callback: (err?: unknown) => void) => void {
+  const statuses = config.statusCodes ?? RETRYABLE_STATUSES;
+  return function retry(err: unknown, context: RetryDecisionContext, callback: (err?: unknown) => void): void {
+    const statusCode = (err as { statusCode?: unknown } | undefined)?.statusCode;
+    const isRetryableStatus = typeof statusCode === "number" && statuses.includes(statusCode);
+    if (!isRetryableStatus || context.state.counter > config.maxRetries) {
+      callback(err);
+      return;
+    }
+    const headers = headersToRecord((err as { headers?: unknown })?.headers);
+    const delayMs = resolveRetryDelayMs(headers, context.state.counter, config);
+    config.onRetryScheduled?.({ attempt: context.state.counter, status: statusCode, delayMs });
+    setTimeout(() => callback(null), delayMs);
+  };
+}
+
+/** Настройки для штатного повторителя ундичи (`RetryAgent`/`RetryHandler`). */
+export function buildRetryAgentOptions(config: TransportRetryConfig): Record<string, unknown> {
+  return {
+    maxRetries: config.maxRetries,
+    statusCodes: [...(config.statusCodes ?? RETRYABLE_STATUSES)],
+    // При исчерпании повторов хендлер получает настоящий ответ (429/5xx),
+    // а не синтетическую ошибку — поведение без повтора сохранено.
+    throwOnError: false,
+    // Штатный список не включает POST, а запросы NIM — это POST.
+    methods: ["GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE", "QUERY", "POST"],
+    retry: makeNvidiaRetryFunction(config),
+  };
+}
+
+export interface RetryTargetDeps {
+  /** Инжектируемый конструктор повторителя (входная точка передаёт `undici.RetryAgent`). */
+  createRetryAgent(agent: DispatchTarget, retryOptions: Record<string, unknown>): DispatchTarget;
+}
+
+/**
+ * Цель-диспетчер с прозрачным повтором: буферизует тело в воспроизводимый вид,
+ * передаёт запрос повторителю, обёрнутому вокруг исходной цели. Наблюдатель
+ * (`wrapHandler`) ставится выше — видит только конечный исход.
+ */
+export function withTransparentRetry(
+  target: DispatchTarget,
+  config: TransportRetryConfig,
+  deps: RetryTargetDeps,
+): SelectiveDispatcherHandle {
+  const retryAgent = deps.createRetryAgent(target, buildRetryAgentOptions(config));
+  return {
+    dispatch(opts: unknown, handler: unknown): boolean {
+      const body = (opts as { body?: unknown } | null)?.body;
+      bufferRequestBody(body)
+        .then((buffered) => {
+          retryAgent.dispatch({ ...(opts as Record<string, unknown>), body: buffered }, handler);
+        })
+        .catch((err) => {
+          (handler as { onResponseError?: (controller: unknown, err: unknown) => void })?.onResponseError?.(null, err);
+        });
+      return true;
+    },
+    close(): Promise<void> {
+      return Promise.resolve((retryAgent as { close?: () => Promise<void> }).close?.());
+    },
+    destroy(): Promise<void> {
+      return Promise.resolve((retryAgent as { destroy?: () => Promise<void> }).destroy?.());
+    },
+  };
+}
+
 export interface SelectiveDispatcherOptions {
   /** Куда идут запросы к NIM (обычно `undici.ProxyAgent`). */
   nvidia: DispatchTarget;
@@ -290,6 +441,8 @@ export interface DispatcherDeps {
   createProxyAgent(url: URL): DispatchTarget;
   /** Необязательный адаптер: превращает утиную обёртку в объект, который можно поставить глобальным диспетчером (например, подкласс реального `undici.Dispatcher`). Маркер должен сохраниться. */
   adapt?: (duck: SelectiveDispatcherHandle) => unknown;
+  /** Конструктор штатного повторителя ундичи — для прозрачного повтора 429/5xx. */
+  createRetryAgent?: (agent: DispatchTarget, retryOptions: Record<string, unknown>) => DispatchTarget;
 }
 
 export interface InstallOptions {
@@ -297,6 +450,8 @@ export interface InstallOptions {
   onObserved?: (status: number, headers: Record<string, string>) => void;
   onDiagnostic?: (diagnostic: NimDiagnostic) => void;
   onProxyError?: (message: string, cause: unknown) => void;
+  /** Включает прозрачный транспортный повтор 429/5xx (нужен `deps.createRetryAgent`). */
+  retry?: TransportRetryConfig;
 }
 
 export interface InstallResult {
@@ -314,8 +469,13 @@ export function ensureDispatcherInstalled(deps: DispatcherDeps, options: Install
   const current = deps.getGlobalDispatcher();
   if (isOurDispatcher(current)) return { installed: false, already: true, dispatcher: current };
   const proxyAgent = deps.createProxyAgent(options.proxyUrl);
+  // Прозрачный повтор 429/5xx: наблюдатель выше повторителя и видит только конечный исход.
+  const nvidiaTarget =
+    options.retry && deps.createRetryAgent
+      ? withTransparentRetry(proxyAgent, options.retry, { createRetryAgent: deps.createRetryAgent })
+      : proxyAgent;
   const duck = createSelectiveDispatcher({
-    nvidia: proxyAgent,
+    nvidia: nvidiaTarget,
     fallback: current as DispatchTarget,
     proxyUrl: options.proxyUrl.toString(),
     onObserved: options.onObserved,

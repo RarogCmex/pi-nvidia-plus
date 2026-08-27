@@ -131,7 +131,18 @@ let proxyErrorNotified = false;
 // Критерий приёмки №2 (ошибка запроса): наблюдатель диспетчера видит 404/410,
 // которые минуют `after_provider_response`. Уведомляем один раз на модель+статус.
 const notifiedDeadResponses = new Set<string>();
+// Диагностика 429/5xx после повторов: не чаще раза в минуту на модель+статус,
+// чтобы ретрай-цикл пи не заваливал пользователя одинаковыми предупреждениями.
+const lastDiagnosticNotify = new Map<string, number>();
 let lastNvidiaModelId: string | undefined;
+
+// Прозрачный транспортный повтор 429/5xx (тикет 14): короткие рейт-лимиты и
+// шлюзовые ошибки повторяются под наблюдателем, и пи с моделью их не видят.
+const TRANSPORT_RETRY = { maxRetries: 3, minDelayMs: 500, maxDelayMs: 30_000 } as const;
+function transportRetryEnabled(): boolean {
+  const raw = process.env.NVIDIA_NIM_TRANSPORT_RETRY?.trim().toLowerCase();
+  return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
+}
 
 function resolvePiUndici(): { undici?: any; error?: string } {
   // argv[1] может быть симлинком (например, ~/.local/bin/pi) — createRequire
@@ -173,6 +184,7 @@ function ensureProxyInstalled(): void {
       getGlobalDispatcher: () => undici.getGlobalDispatcher(),
       setGlobalDispatcher: (d) => undici.setGlobalDispatcher(d),
       createProxyAgent: (url: URL) => new undici.ProxyAgent(url.toString()),
+      createRetryAgent: (agent, retryOptions) => new undici.RetryAgent(agent, retryOptions),
       adapt: (duck) => {
         class SelectiveDispatcher extends DispatcherBase {
           dispatch(opts: unknown, handler: unknown): boolean {
@@ -211,6 +223,11 @@ function ensureProxyInstalled(): void {
       },
       onDiagnostic: (d: NimDiagnostic) => {
         debug("nvidia-diagnostic", `status=${d.status}`, d);
+        const key = `${d.status}:${lastNvidiaModelId ?? "?"}`;
+        const now = Date.now();
+        const last = lastDiagnosticNotify.get(key);
+        if (last !== undefined && now - last < 60_000) return;
+        lastDiagnosticNotify.set(key, now);
         proxyState.notify?.(formatDiagnostic(d), "warning");
       },
       onProxyError: (message) => {
@@ -221,11 +238,24 @@ function ensureProxyInstalled(): void {
           proxyState.notify?.(`pi-nvidia-plus: ${message}`, "error");
         }
       },
+      retry: transportRetryEnabled()
+        ? {
+            ...TRANSPORT_RETRY,
+            onRetryScheduled: (info) => {
+              debug("nvidia-retry", `статус=${info.status}, повтор ${info.attempt}, задержка ${info.delayMs} мс`, info);
+              const seconds = Math.max(1, Math.round(info.delayMs / 1000));
+              proxyState.notify?.(
+                `NIM ${info.status}: повторяю прозрачно (попытка ${info.attempt + 1} из ${TRANSPORT_RETRY.maxRetries + 1}, через ${seconds} с)`,
+                "info",
+              );
+            },
+          }
+        : undefined,
     },
   );
   if (result.installed) {
     proxyState.installed = true;
-    debug("proxy-installed", proxyState.url.toString(), { fallback: "предыдущий глобальный диспетчер" });
+    debug("proxy-installed", proxyState.url.toString(), { fallback: "предыдущий глобальный диспетчер", повтор: transportRetryEnabled() });
   } else {
     debug("proxy-install-skip", proxyState.url.toString(), { already: result.already });
   }
@@ -501,10 +531,15 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             ? `proxy ${proxyState.url?.toString() ?? "?"}: установлен, но ${proxyState.preflightError}`
             : `proxy ${proxyState.url?.toString() ?? "?"}${proxyState.installed ? " (установлен)" : ""}`
         : "proxy: не настроен (NVIDIA_NIM_PROXY)";
+      const retryState = proxyState.configured
+        ? transportRetryEnabled()
+          ? `прозрачный повтор 429/5xx: вкл (до ${TRANSPORT_RETRY.maxRetries} повторов)`
+          : "прозрачный повтор 429/5xx: выкл (NVIDIA_NIM_TRANSPORT_RETRY)"
+        : undefined;
       const model = ctx.model;
       if (!model || model.provider !== PROVIDER) {
         ctx.ui.notify(
-          `pi-nvidia-plus (${auto}; ${proxy}): current model is not nvidia (${model ? `${model.provider}/${model.id}` : "none"})`,
+          `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}): current model is not nvidia (${model ? `${model.provider}/${model.id}` : "none"})`,
           "info",
         );
         return;
@@ -512,7 +547,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const level = ctx.thinkingLevel;
       const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
       ctx.ui.notify(
-        `pi-nvidia-plus (${auto}; ${proxy}): ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
+        `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}): ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
         "info",
       );
     },
