@@ -72,7 +72,7 @@ const DEAD_MODELS: Record<string, string> = {
   "nvidia/nemotron-nano-12b-v2-vl": "410 EOL",
   "nvidia/nvidia-nemotron-nano-9b-v2": "410 EOL",
   "thinkingmachines/inkling": "410 EOL",
-  "deepseek-ai/deepseek-v4-flash-0731": "404 in all probes",
+  "deepseek-ai/deepseek-v4-flash-0731": "flapping: 200 once, then persistent 404 (2026-08-28)",
   "google/gemma-3-4b-it": "404 in all probes",
   "google/gemma-3-12b-it": "404 in all probes",
   "mistralai/mistral-7b-instruct-v0.3": "404 in all probes",

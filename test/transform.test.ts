@@ -95,9 +95,10 @@ const bare = transformRequest(
 assert.equal((bare.payload.messages as any[])[0].content, "x");
 assert.equal(kwargs(bare.payload).thinking_mode, undefined, "без уровня инжектится мышление");
 
-// 9. Гипотезы из референсов (непроверенные семейства, живых моделей нет).
-// DeepSeek V4: пи шлёт `thinking` + `reasoning_effort` top-level, NIM требует
-// их в `chat_template_kwargs` (референс: формат "deepseek-v4").
+// 9. Конверсии из референсов. DeepSeek V4 проверена живыми пробами 2026-08-28 на
+// `deepseek-ai/deepseek-v4-pro-0813` (off гасит reasoning_content, low/high/max
+// дают его); пи шлёт `thinking` + `reasoning_effort` top-level, NIM требует их в
+// `chat_template_kwargs` (референс: формат "deepseek-v4"). GLM — пока гипотеза.
 const DSV4 = "deepseek-ai/deepseek-v4-flash-0731";
 const dsOn = transformRequest(
   { model: DSV4, thinking: { type: "enabled" }, reasoning_effort: "high" },
@@ -121,6 +122,14 @@ const dsDefault = transformRequest(
   { modelId: DSV4, thinkingLevel: "high" },
 );
 assert.equal(kwargs(dsDefault.payload).reasoning_effort, "high", "DeepSeek V4: дефолт effort не high");
+
+// max переносится в kwargs без изменения (живая проба: 200, reasoning_content).
+const dsMax = transformRequest(
+  { model: DSV4, thinking: { type: "enabled" }, reasoning_effort: "max" },
+  { modelId: DSV4, thinkingLevel: "max" },
+);
+assert.equal(kwargs(dsMax.payload).thinking, true, "DeepSeek V4: max не включает thinking в kwargs");
+assert.equal(kwargs(dsMax.payload).reasoning_effort, "max", "DeepSeek V4: effort max не перенесён");
 
 // GLM (z-ai/glm*): enable_thinking + clear_thinking в kwargs, усилие —
 // отображённое в top-level `reasoning_effort` (референс: формат "qwen-chat-template").

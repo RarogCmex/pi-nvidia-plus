@@ -26,9 +26,11 @@ const NEMOTRON_THINKING_MODELS = new Set([
   "nvidia/nemotron-3.5-lightning-30b-a3b",
 ]);
 
-// ── Гипотезы из референсов (НЕ проверены: живых моделей этих семейств нет) ──
+// ── Гипотезы из референсов ────────────────────────────────────────────────
 // Источник — `subprojects/pi-nvidia-nim-provider` (handlers/thinking.ts,
-// config/model-families.ts). Включатся сами, если модель появится в каталоге.
+// config/model-families.ts). DeepSeek V4 проверена живыми пробами 2026-08-28 на
+// `deepseek-ai/deepseek-v4-pro-0813` (thinking=false гасит reasoning_content,
+// thinking=true + reasoning_effort low/high/max дают его); GLM остаётся гипотезой.
 const DEEPSEEK_V4 = /^deepseek-ai\/deepseek-v4/;
 const GLM = /^z-ai\/glm/;
 
@@ -111,9 +113,11 @@ function applyThinking(payload: Payload, modelId: string, level: string): boolea
 }
 
 /**
- * DeepSeek V4 (гипотеза из референсов, живых моделей нет — не проверена):
- * пи шлёт `thinking` и `reasoning_effort` top-level, NIM требует их в
+ * DeepSeek V4: пи шлёт `thinking` и `reasoning_effort` top-level, NIM требует их в
  * `chat_template_kwargs`. Преобразование по референс-хендлеру "deepseek-v4".
+ * Проверено живыми пробами 2026-08-28 на `deepseek-ai/deepseek-v4-pro-0813`:
+ * `thinking=false` — 200 без reasoning_content; `thinking=true` + `reasoning_effort`
+ * low/high/max — 200, reasoning_content появляется и растёт с усилием.
  */
 function applyDeepSeekV4Thinking(payload: Payload, level: string): boolean {
   const kwargs = ensureChatTemplateKwargs(payload);
