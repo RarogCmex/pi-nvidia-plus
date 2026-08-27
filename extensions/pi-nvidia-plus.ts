@@ -34,8 +34,9 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { applyFiles, loadState, rollbackFiles, MODELS_JSON, STATE_FILE } from "./store.ts";
+import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscovered, MODELS_JSON, STATE_FILE } from "./store.ts";
 import { transformRequest, thinkingPlan, type Payload } from "./transform.ts";
+import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import {
   parseProxyUrl,
   ensureDispatcherInstalled,
@@ -43,6 +44,7 @@ import {
   describeProxyFailure,
   formatDiagnostic,
   markDispatcher,
+  NVIDIA_ORIGIN,
   type NimDiagnostic,
 } from "./proxy.ts";
 
@@ -71,6 +73,24 @@ const DEAD_MODELS: Record<string, string> = {
   "nvidia/cosmos-reason2-8b": "404 in all probes",
   "nvidia/llama-3.1-nemotron-70b-instruct": "404 in all probes (re-check ticket 08)",
   "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in all probes",
+  // Вне базы пи (аудит 02; нужно для живого обнаружения — не добавлять мёртвых)
+  "01-ai/yi-large": "404 in all probes (audit 02)",
+  "ai21labs/jamba-1.5-large-instruct": "404 in all probes (audit 02)",
+  "databricks/dbrx-instruct": "404 in all probes (audit 02)",
+  "deepseek-ai/deepseek-v4-flash": "410 EOL (audit 02)",
+  "deepseek-ai/deepseek-v4-pro": "410 EOL (audit 02)",
+  "microsoft/phi-3-vision-128k-instruct": "404 in all probes (audit 02)",
+  "microsoft/phi-3.5-moe-instruct": "404 in all probes (audit 02)",
+  "mistralai/codestral-22b-instruct-v0.1": "404 in all probes (audit 02)",
+  "mistralai/mistral-large": "404 in all probes (audit 02)",
+  "mistralai/mistral-large-2-instruct": "404 in all probes (audit 02)",
+  "mistralai/mixtral-8x22b-v0.1": "404 in all probes (audit 02)",
+  "nvidia/llama-3.1-nemotron-51b-instruct": "404 in all probes (audit 02)",
+  "nvidia/nemotron-4-340b-instruct": "404 in all probes (audit 02)",
+  "nvidia/nemotron-mini-4b-instruct": "410 EOL (audit 02)",
+  "nvidia/nemotron-nano-3-30b-a3b": "404 in all probes (audit 02)",
+  "nvidia/vila": "404 in all probes (audit 02)",
+  "writer/palmyra-creative-122b": "404 in all probes (audit 02)",
 };
 
 function debug(stage: string, label: string, payload: unknown): void {
@@ -309,6 +329,15 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         `⚠ ${event.model.id}: reported dead on NIM (${dead}). Requests will likely fail — you can still try, or pick another model.`,
         "warning",
       );
+      return;
+    }
+    // Динамическое предупреждение по итогам живого обнаружения (тикет 12).
+    const report = loadDiscoveryReport();
+    if (report?.missingKnown.includes(event.model.id)) {
+      ctx.ui.notify(
+        `⚠ ${event.model.id}: отсутствовала в живом каталоге NIM при последнем обнаружении (${report.discoveredAt}). Запросы могут не пройти.`,
+        "warning",
+      );
     }
   });
 
@@ -460,6 +489,78 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         `pi-nvidia-plus (${auto}; ${proxy}): ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
         "info",
       );
+    },
+  });
+
+  // ── Живое обнаружение моделей (тикет 12) ───────────────────────────────
+  // Триггер — команда, а не старт сессии: обнаружение опционально и не должно
+  // добавлять сетевую зависимость к каждой загрузке пи.
+  pi.registerCommand("nvidia-plus-discover", {
+    description: "Live NIM discovery: GET /v1/models, add new chat models, mark missing known models",
+    handler: async (_args, ctx) => {
+      try {
+        ensureProxyInstalled();
+        const headers: Record<string, string> = {};
+        const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER);
+        if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+        const res = await fetch(`${NVIDIA_ORIGIN}/v1/models`, {
+          headers,
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!res.ok) {
+          ctx.ui.notify(`pi-nvidia-plus: NIM /v1/models вернул HTTP ${res.status}`, "error");
+          return;
+        }
+        const live = parseModelsResponse(await res.json());
+        if (live.length === 0) {
+          ctx.ui.notify("pi-nvidia-plus: не удалось разобрать ответ NIM /v1/models", "error");
+          return;
+        }
+        const baseIds = ctx.modelRegistry
+          .getAll()
+          .filter((m) => m.provider === PROVIDER)
+          .map((m) => m.id);
+        const summary = classifyDiscovery(live, { baseIds, deadIds: Object.keys(DEAD_MODELS) });
+        writeDiscovered({
+          models: summary.newChat.map((id) => ({ id })),
+          report: {
+            discoveredAt: new Date().toISOString(),
+            live: summary.live,
+            chat: summary.chat,
+            nonChat: summary.nonChat,
+            missingKnown: summary.missingKnown,
+          },
+        });
+        debug("discovery", `live=${summary.live}`, summary);
+
+        if (summary.newChat.length > 0) {
+          const result = applyFiles(false);
+          if (result.changed) await ctx.modelRegistry.refresh({ allowNetwork: false });
+          for (const conflict of result.conflicts) {
+            ctx.ui.notify(
+              `pi-nvidia-plus: ${conflict.providerId}/${conflict.modelId} (${conflict.kind}) — ${conflict.reason}`,
+              "warning",
+            );
+          }
+        }
+
+        const added = summary.newChat.length > 0 ? `; добавлено новых: ${summary.newChat.join(", ")}` : "";
+        const missing = summary.missingKnown.length > 0 ? `; отсутствуют (подозрение на смерть): ${summary.missingKnown.join(", ")}` : "";
+        ctx.ui.notify(
+          `pi-nvidia-plus: обнаружение — живых ${summary.live} (чат ${summary.chat.length}, не-чат отсеяно ${summary.nonChat.length})${added}${missing}`,
+          "info",
+        );
+      } catch (e) {
+        const cause = (e as { cause?: unknown } | null)?.cause ?? e;
+        const hint =
+          proxyState.configured && proxyState.url && (isProxyConnectError(e) || isProxyConnectError(cause))
+            ? ` — ${describeProxyFailure(proxyState.url.toString(), cause)}`
+            : "";
+        ctx.ui.notify(
+          `pi-nvidia-plus: обнаружение не удалось${hint} (${e instanceof Error ? e.message : String(e)})`,
+          "error",
+        );
+      }
     },
   });
 }

@@ -156,5 +156,58 @@ assert.ok(defaults.modelsJson.endsWith(join(".pi", "agent", "models.json")), "д
   assert.throws(() => applyFiles(false, p), /foreign providers/);
 }
 
+// 6. Живое обнаружение: найденные модели применяются тем же механизмом владения.
+{
+  const base = freshDir("discovered");
+  const overridesFile = join(base, "overrides.json");
+  writeOverrides(overridesFile);
+  const p = storePaths(base, overridesFile);
+
+  // Записи без id и мусор в файле обнаружения не ломают применение.
+  writeFileSync(
+    p.discoveredFile,
+    JSON.stringify({
+      models: [{ id: "writer/palmyra-creative-122b" }, { name: "без id" }, null, { id: "" }],
+      report: { discoveredAt: "x", live: 84, chat: ["writer/palmyra-creative-122b"], nonChat: [], missingKnown: [] },
+    }),
+    "utf8",
+  );
+
+  const applied = applyFiles(false, p);
+  assert.ok(applied.summary.modelIds.includes("nvidia/writer/palmyra-creative-122b"), "найденная модель не применена");
+  assert.ok(
+    readModels(p).providers.nvidia.models.some((m: any) => m.id === "writer/palmyra-creative-122b"),
+    "найденная модель не в models.json",
+  );
+  assert.ok(loadState(p)?.providers.nvidia.models["writer/palmyra-creative-122b"], "найденная модель не в леджере");
+
+  // Файл обнаружения исчез — запись чистится как устаревшая, оверрайды пакета не задеты.
+  rmSync(p.discoveredFile);
+  const after = applyFiles(false, p);
+  assert.deepEqual(after.pruned, ["nvidia/models/writer/palmyra-creative-122b"]);
+  assert.ok(
+    !readModels(p).providers.nvidia.models?.some((m: any) => m.id === "writer/palmyra-creative-122b"),
+    "найденная модель не удалена после исчезновения файла обнаружения",
+  );
+  assert.ok(
+    readModels(p).providers.nvidia.models?.some((m: any) => m.id === "moonshotai/kimi-k3"),
+    "оверрайды пакета задеты чисткой обнаружения",
+  );
+}
+
+// 6a. Откат убирает и найденные модели (общий леджер).
+{
+  const base = freshDir("discovered-rollback");
+  const overridesFile = join(base, "overrides.json");
+  writeOverrides(overridesFile);
+  const p = storePaths(base, overridesFile);
+  writeFileSync(p.discoveredFile, JSON.stringify({ models: [{ id: "zyphra/zamba2-7b-instruct" }] }), "utf8");
+  applyFiles(false, p);
+
+  const result = rollbackFiles(p);
+  assert.ok(result.removed.includes("nvidia/models/zyphra/zamba2-7b-instruct"), "найденная модель не откатилась");
+  assert.ok(!readModels(p).providers?.nvidia?.models?.some((m: any) => m.id === "zyphra/zamba2-7b-instruct"));
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log("store: все проверки прошли");

@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   applyOverrides,
+  mergeModelsJson,
   rollbackOverrides,
   validateOverrides,
   type Conflict,
@@ -35,6 +36,8 @@ export interface StorePaths {
   modelsJson: string;
   stateFile: string;
   backupFile: string;
+  /** Файл живого обнаружения (тикет 12): найденные модели + отчёт. */
+  discoveredFile: string;
 }
 
 export function storePaths(baseDir: string = DEFAULT_BASE_DIR, overridesFile: string = DEFAULT_OVERRIDES_FILE): StorePaths {
@@ -44,6 +47,7 @@ export function storePaths(baseDir: string = DEFAULT_BASE_DIR, overridesFile: st
     modelsJson,
     stateFile: join(baseDir, "nvidia-plus-models.json"),
     backupFile: `${modelsJson}.bak-pi-nvidia-plus`,
+    discoveredFile: join(baseDir, "nvidia-plus-discovered.json"),
   };
 }
 
@@ -90,13 +94,51 @@ export interface ApplyFilesResult {
   pruned: string[];
 }
 
+// ── Живое обнаружение (тикет 12) ──────────────────────────────────────────
+export interface DiscoveryReport {
+  discoveredAt: string;
+  live: number;
+  chat: string[];
+  nonChat: string[];
+  /** Известные модели, отсутствующие в живом списке и не помеченные мёртвыми. */
+  missingKnown: string[];
+}
+
+export interface DiscoveredFile {
+  /** Новые чат-модели, добавляемые в `models.json` тем же механизмом владения. */
+  models?: Array<{ id: string; name?: string }>;
+  report?: DiscoveryReport;
+}
+
+export function loadDiscovered(paths: StorePaths = storePaths()): { desired: ModelsJson; report?: DiscoveryReport } {
+  const parsed = readJson(paths.discoveredFile) as DiscoveredFile | undefined;
+  if (!parsed || typeof parsed !== "object") return { desired: {} };
+  const models = Array.isArray(parsed.models)
+    ? parsed.models.filter((m): m is { id: string; name?: string } => !!m && typeof m.id === "string" && m.id.length > 0)
+    : [];
+  const desired: ModelsJson = models.length > 0 ? { providers: { [PROVIDER]: { models } } } : {};
+  return { desired, report: parsed.report };
+}
+
+export function writeDiscovered(file: DiscoveredFile, paths: StorePaths = storePaths()): void {
+  writeJson(paths.discoveredFile, file);
+}
+
+export function loadDiscoveryReport(paths: StorePaths = storePaths()): DiscoveryReport | undefined {
+  return loadDiscovered(paths).report;
+}
+
 /**
  * Применить оверрайды к `models.json` и обновить леджер. Идемпотентно.
+ * Желаемое состояние — оверрайд-файл пакета плюс найденные живым обнаружением
+ * модели; обе части под одним леджером владения.
  * `overwrite: false` (автоприменение) — конфликтные записи пропускаются;
  * `overwrite: true` (явная команда с `force`) — перезаписываются.
  */
 export function applyFiles(overwrite: boolean, paths: StorePaths = storePaths()): ApplyFilesResult {
-  const desired = loadOverrides(paths);
+  const overrides = loadOverrides(paths);
+  const discovered = loadDiscovered(paths).desired;
+  const desired = discovered.providers ? mergeModelsJson(overrides, discovered).merged : overrides;
   const target = (readJson(paths.modelsJson) ?? {}) as ModelsJson;
   const ledger = loadState(paths);
 
