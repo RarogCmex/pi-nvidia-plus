@@ -297,6 +297,25 @@ const ROTATABLE_STATUSES = new Set([429, 401, 403]);
  * остальное стримит в настоящий хендлер без задержки. Новый протокол ундичи 8 —
    другой в диспетчерах ундичи и не принимается.
  */
+/** Позвать метод настоящего хендлера (если есть); `this` — сам хендлер. */
+function callHandlerMethod(real: Record<string, unknown> | null, name: string, ...args: unknown[]): unknown {
+  const fn = real?.[name];
+  if (typeof fn !== "function") return undefined;
+  return (fn as (...a: unknown[]) => unknown).apply(real, args);
+}
+
+/** Делегирование close/destroy внутренней цели. */
+function forwardLifecycle(target: DispatchTarget): Pick<SelectiveDispatcherHandle, "close" | "destroy"> {
+  return {
+    close(): Promise<void> {
+      return Promise.resolve((target as { close?: () => Promise<void> }).close?.());
+    },
+    destroy(): Promise<void> {
+      return Promise.resolve((target as { destroy?: () => Promise<void> }).destroy?.());
+    },
+  };
+}
+
 function makeRotationAttemptHandler(
   real: Record<string, unknown> | null,
   controller: RotationController,
@@ -310,11 +329,7 @@ function makeRotationAttemptHandler(
     settled = true;
     settle(outcome);
   };
-  const call = (name: string, ...args: unknown[]): unknown => {
-    const fn = real?.[name];
-    if (typeof fn !== "function") return undefined;
-    return (fn as (...a: unknown[]) => unknown).apply(real, args);
-  };
+  const call = (name: string, ...args: unknown[]): unknown => callHandlerMethod(real, name, ...args);
   return {
     onRequestStart(conn: unknown, context: unknown) {
       controller.target = conn as never;
@@ -389,14 +404,10 @@ function dispatchRotationAttempt(
 function deliverBufferedResponse(real: Record<string, unknown> | null, controller: RotationController, response: BufferedRotationResponse): void {
   if (!real) return;
   try {
-    const call = (name: string, ...args: unknown[]): void => {
-      const fn = real[name];
-      if (typeof fn === "function") (fn as (...a: unknown[]) => unknown).apply(real, args);
-    };
-    call("onResponseStarted");
-    call("onResponseStart", controller, response.status, response.headers, response.statusMessage);
-    for (const chunk of response.chunks) call("onResponseData", controller, chunk);
-    call("onResponseEnd", controller, response.trailers ?? {});
+    callHandlerMethod(real, "onResponseStarted");
+    callHandlerMethod(real, "onResponseStart", controller, response.status, response.headers, response.statusMessage);
+    for (const chunk of response.chunks) callHandlerMethod(real, "onResponseData", controller, chunk);
+    callHandlerMethod(real, "onResponseEnd", controller, response.trailers ?? {});
   } catch {
     // отдача не должна ронять цикл ротации
   }
@@ -405,8 +416,7 @@ function deliverBufferedResponse(real: Record<string, unknown> | null, controlle
 function deliverHandlerError(real: Record<string, unknown> | null, controller: RotationController, err: unknown): void {
   if (!real) return;
   try {
-    const fn = real.onResponseError;
-    if (typeof fn === "function") (fn as (...a: unknown[]) => unknown).apply(real, [controller, err]);
+    callHandlerMethod(real, "onResponseError", controller, err);
   } catch {
     // отдача не должна ронять цикл ротации
   }
@@ -556,12 +566,7 @@ export function withKeyRotation(target: DispatchTarget, options: RotationLayerOp
       });
       return true;
     },
-    close(): Promise<void> {
-      return Promise.resolve((target as { close?: () => Promise<void> }).close?.());
-    },
-    destroy(): Promise<void> {
-      return Promise.resolve((target as { destroy?: () => Promise<void> }).destroy?.());
-    },
+    ...forwardLifecycle(target),
   };
 }
 
@@ -707,12 +712,7 @@ export function withTransparentRetry(
         });
       return true;
     },
-    close(): Promise<void> {
-      return Promise.resolve((retryAgent as { close?: () => Promise<void> }).close?.());
-    },
-    destroy(): Promise<void> {
-      return Promise.resolve((retryAgent as { destroy?: () => Promise<void> }).destroy?.());
-    },
+    ...forwardLifecycle(retryAgent),
   };
 }
 

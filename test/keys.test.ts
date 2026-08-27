@@ -355,4 +355,26 @@ function keys(pick: RotationPick): string | undefined {
   for (const row of report) assert.ok(!row.masked.includes("nvapi-"), row.masked);
 }
 
+// 21. Мёртвый посреди запроса ключ не раздувает круги: потолок — две попытки на живой ключ.
+{
+  const r = new KeyRotator();
+  r.setPool(["nvapi-b", "nvapi-c"]);
+  const req = r.beginRequest("nvapi-pi", 0);
+  assert.equal(keys(req.pick(0)), "nvapi-pi");
+  r.markDead("nvapi-pi"); // ключ пи умер на первой попытке
+  const seen: string[] = [];
+  let t = 0;
+  for (;;) {
+    const pick = req.pick(t);
+    if (pick.kind === "exhausted") break;
+    if (pick.kind === "wait") {
+      t += pick.ms + 1;
+      continue;
+    }
+    seen.push(pick.key);
+    r.markRateLimited(pick.key, 1_000, t);
+  }
+  assert.deepEqual(seen, ["nvapi-b", "nvapi-c", "nvapi-b", "nvapi-c"], "два круга по живым, без лишних попыток");
+}
+
 console.log("keys: все проверки прошли");

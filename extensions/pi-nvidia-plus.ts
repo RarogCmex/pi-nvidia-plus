@@ -31,7 +31,8 @@
  * Ротация ключей (тикет 15): пул `~/.pi/agent/nvidia-keys.json` (или `NVIDIA_NIM_KEYS[_FILE]`)
  * ставит обёртку даже без прокси; на 429 после исчерпания повторов ключ меняется,
  * на 401/403 — исключается до конца сессии; аварийные выключатели —
- * `NVIDIA_NIM_KEY_ROTATION=0` и `/nvidia-plus-keys off|on`.
+ * `NVIDIA_NIM_KEY_ROTATION=0` и `/nvidia-plus-keys off|on`. При выключенном прозрачном
+ * повторе (`NVIDIA_NIM_TRANSPORT_RETRY=0`) ротация вырождается в переключение на первый же 429.
  */
 import { appendFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
@@ -211,7 +212,11 @@ function ensureTransportInstalled(): void {
         getPoolKeys: () => keyPool.refresh(),
         enabled: () => keyRotationState.enabled,
         onSwitch: (info: { from: string; to: string; status: number }) => {
-          debug("nvidia-rotation-switch", `${maskKey(info.from)} → ${maskKey(info.to)}`, info);
+          debug("nvidia-rotation-switch", `${maskKey(info.from)} → ${maskKey(info.to)}`, {
+            from: maskKey(info.from),
+            to: maskKey(info.to),
+            status: info.status,
+          });
           proxyState.notify?.(
             `NIM ${info.status}: ключ ${maskKey(info.from)} исчерпан — переключаюсь на ключ ${maskKey(info.to)} (ротация пула)`,
             "info",

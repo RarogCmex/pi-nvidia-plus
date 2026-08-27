@@ -285,15 +285,13 @@ export interface RotationKeyStatus {
  * Сессионное состояние (кулдауны, мёртвые, липкий ключ) — в ротаторе.
  */
 export class RotationRequest {
-  private attempts = 0;
+  private readonly attemptsByKey = new Map<string, number>();
   private readonly rotator: KeyRotator;
   private readonly ring: string[];
-  private readonly maxAttempts: number;
 
-  constructor(rotator: KeyRotator, ring: string[], maxAttempts: number) {
+  constructor(rotator: KeyRotator, ring: string[], _maxAttempts?: number) {
     this.rotator = rotator;
     this.ring = ring;
-    this.maxAttempts = maxAttempts;
   }
 
   /** Есть ли смысл вращаться: ≥2 живых ключа, либо ≥1 живой при мёртвом ключе пи. */
@@ -305,17 +303,18 @@ export class RotationRequest {
 
   /**
    * Следующий ключ: липкий активный, дальше по кольцу; готовые предпочитются
-   * ожидающим. Все в кулдауне — ждать ближайший откат; все мертвы или два
-   * круга пройдены — исчерпание. Выдача ключа засчитывается как попытка.
+   * ожидающим. Каждый живой ключ — не больше двух попыток на запрос (два полных
+   * круга по живым; мёртвый посреди запроса ключ круги не раздувает). Все живые
+   * с попытками в кулдауне — ждать ближайший откат; попыток не осталось — исчерпание.
    */
   pick(now: number): RotationPick {
-    if (this.attempts >= this.maxAttempts) return { kind: "exhausted" };
     const ready = (k: string): boolean => !this.rotator.isDead(k) && this.rotator.cooldownLeft(k, now) === 0;
+    const hasAttempts = (k: string): boolean => (this.attemptsByKey.get(k) ?? 0) < 2;
 
-    const candidates = this.ring.filter((k) => !this.rotator.isDead(k));
-    if (candidates.length === 0) return { kind: "exhausted" };
+    const remaining = this.ring.filter((k) => !this.rotator.isDead(k) && hasAttempts(k));
+    if (remaining.length === 0) return { kind: "exhausted" };
 
-    const readyKeys = candidates.filter(ready);
+    const readyKeys = remaining.filter(ready);
     const active = this.rotator.activeKey();
     let chosen: string | undefined;
     if (active && readyKeys.includes(active)) {
@@ -324,11 +323,11 @@ export class RotationRequest {
       chosen = readyKeys[0]; // круговой обход от начала кольца
     }
     if (chosen !== undefined) {
-      this.attempts += 1;
+      this.attemptsByKey.set(chosen, (this.attemptsByKey.get(chosen) ?? 0) + 1);
       return { kind: "key", key: chosen };
     }
 
-    const nearest = Math.min(...candidates.map((k) => this.rotator.cooldownLeft(k, now)));
+    const nearest = Math.min(...remaining.map((k) => this.rotator.cooldownLeft(k, now)));
     return { kind: "wait", ms: Math.max(0, nearest) };
   }
 
@@ -375,8 +374,7 @@ export class KeyRotator {
     const ring: string[] = [];
     if (requestKey) ring.push(requestKey);
     for (const key of this.pool) if (!ring.includes(key)) ring.push(key);
-    const maxAttempts = 2 * ring.filter((k) => !this.dead.has(k)).length;
-    return new RotationRequest(this, ring, maxAttempts);
+    return new RotationRequest(this, ring);
   }
 
   /** 429: ключ в кулдауне на время из `retry-after` (транспорт уже посчитал мс). */
