@@ -167,6 +167,20 @@ const keyRotationState = {
   installedWithRotation: false,
 };
 
+// Представление ротации — один раз и только при выбранной модели nvidia:
+// на старте сессии (если она уже стоит) или при выборе модели.
+let rotationIntroNotified = false;
+function notifyRotationIntro(ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }): void {
+  if (rotationIntroNotified || !keyPool.hasSource()) return;
+  rotationIntroNotified = true;
+  const poolSize = keyPool.refresh().length;
+  const state = keyRotationState.enabled ? "вкл" : "выкл (снимаем: /nvidia-plus-keys on)";
+  ui.notify(
+    `пи-нвидиа-плюс: ротация ключей NIM ${state} — пул ${keyPool.describe()}: ${poolSize} ключ(ей) + ключ пи первым. Статус: /nvidia-plus-keys`,
+    "info",
+  );
+}
+
 function resolvePiUndici(): { undici?: any; error?: string } {
   // argv[1] может быть симлинком (например, ~/.local/bin/pi) — createRequire
   // его не разворачивает, поэтому берём realpath.
@@ -411,13 +425,8 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         void preflightProxy();
       }
     }
-    if (keyPool.hasSource() && ctx.hasUI) {
-      const poolSize = keyPool.refresh().length;
-      const state = keyRotationState.enabled ? "вкл" : "выкл (снимаем: /nvidia-plus-keys on)";
-      ctx.ui.notify(
-        `пи-нвидиа-плюс: ротация ключей NIM ${state} — пул ${keyPool.describe()}: ${poolSize} ключ(ей) + ключ пи первым. Статус: /nvidia-plus-keys`,
-        "info",
-      );
+    if (ctx.hasUI && ctx.model?.provider === PROVIDER) {
+      notifyRotationIntro(ctx.ui);
     }
     try {
       if (loadState()?.enabled === false) return; // погашено откатом
@@ -456,6 +465,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       lastNvidiaModelId = undefined;
       return;
     }
+    notifyRotationIntro(ctx.ui);
     const dead = DEAD_MODELS[event.model.id];
     if (dead) {
       ctx.ui.notify(
