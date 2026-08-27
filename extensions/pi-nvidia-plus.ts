@@ -128,6 +128,10 @@ interface ProxyState {
 
 const proxyState: ProxyState = { configured: false, installed: false, preflightDone: false };
 let proxyErrorNotified = false;
+// Критерий приёмки №2 (ошибка запроса): наблюдатель диспетчера видит 404/410,
+// которые минуют `after_provider_response`. Уведомляем один раз на модель+статус.
+const notifiedDeadResponses = new Set<string>();
+let lastNvidiaModelId: string | undefined;
 
 function resolvePiUndici(): { undici?: any; error?: string } {
   // argv[1] может быть симлинком (например, ~/.local/bin/pi) — createRequire
@@ -190,6 +194,17 @@ function ensureProxyInstalled(): void {
       proxyUrl: proxyState.url,
       onObserved: (status, headers) => {
         debug("nvidia-response", `status=${status}`, { status, headers });
+        if (status === 404 || status === 410) {
+          const key = `${status}:${lastNvidiaModelId ?? "?"}`;
+          if (!notifiedDeadResponses.has(key)) {
+            notifiedDeadResponses.add(key);
+            const dead = lastNvidiaModelId ? DEAD_MODELS[lastNvidiaModelId] : undefined;
+            proxyState.notify?.(
+              `NIM ${status}: ${lastNvidiaModelId ?? "запрос к nvidia"}${dead ? ` — помечена мёртвой (${dead})` : " — модели с таким id нет в живом каталоге"}. Попробуйте другую модель.`,
+              "warning",
+            );
+          }
+        }
       },
       onDiagnostic: (d: NimDiagnostic) => {
         debug("nvidia-diagnostic", `status=${d.status}`, d);
@@ -349,6 +364,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   // ── (2) Поведение — кодом: thinking-инжект + нормализация ────────────────
   pi.on("before_provider_request", (event, ctx) => {
     if (ctx.model?.provider !== PROVIDER) return; // (5) другие провайдеры не трогаем
+    lastNvidiaModelId = ctx.model.id;
     // Пи пересоздаёт глобальный диспетчер при /reload и смене настроек —
     // переустанавливаем обёртку лениво перед каждым запросом (идемпотентно).
     ensureProxyInstalled();
