@@ -27,6 +27,11 @@
  * глобальный диспетчер (вариант A исследования 04); остальной трафик не трогается.
  * Обёртка наблюдает ответы и показывает диагностику 429/5xx (retry-after, request ID)
  * прямо во время ретрай-пауз пи.
+ *
+ * Ротация ключей (тикет 15): пул `~/.pi/agent/nvidia-keys.json` (или `NVIDIA_NIM_KEYS[_FILE]`)
+ * ставит обёртку даже без прокси; на 429 после исчерпания повторов ключ меняется,
+ * на 401/403 — исключается до конца сессии; аварийные выключатели —
+ * `NVIDIA_NIM_KEY_ROTATION=0` и `/nvidia-plus-keys off|on`.
  */
 import { appendFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
@@ -37,6 +42,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscovered, MODELS_JSON, STATE_FILE } from "./store.ts";
 import { transformRequest, thinkingPlan, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
+import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
 import {
   parseProxyUrl,
   ensureDispatcherInstalled,
@@ -144,6 +150,22 @@ function transportRetryEnabled(): boolean {
   return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
 }
 
+// ── Ротация ключей NIM (тикет 15) ──────────────────────────────────────────────
+// Пул читается из файла/окружения (расширение его никогда не пишет); ключ пи всегда первый в кольце — его подставляет сам пи в `Authorization`.
+const keyPool = new KeyPool({
+  defaultPath: join(homedir(), ".pi", "agent", DEFAULT_KEYS_FILE_NAME),
+  env: process.env as Record<string, string | undefined>,
+  onWarn: (message) => proxyState.notify?.(message, "warning"),
+});
+const keyRotator = new KeyRotator();
+const keyRotationState = {
+  enabled: (() => {
+    const raw = process.env.NVIDIA_NIM_KEY_ROTATION?.trim().toLowerCase();
+    return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
+  })(),
+  installedWithRotation: false,
+};
+
 function resolvePiUndici(): { undici?: any; error?: string } {
   // argv[1] может быть симлинком (например, ~/.local/bin/pi) — createRequire
   // его не разворачивает, поэтому берём realpath.
@@ -170,8 +192,12 @@ function resolvePiUndici(): { undici?: any; error?: string } {
 }
 
 /** Идемпотентная установка обёртки; безопасно вызывать перед каждым запросом. */
-function ensureProxyInstalled(): void {
-  if (!proxyState.configured || !proxyState.url || proxyState.installError) return;
+function ensureTransportInstalled(): void {
+  if (proxyState.installError) return;
+  const proxyReady = !!(proxyState.configured && proxyState.url);
+  // Пул ключей (тикет 15): обёртка ставится и без прокси, если пул задан.
+  const poolPresent = keyPool.hasSource();
+  if (!proxyReady && !poolPresent) return; // без конфигурации поведение не меняется
   const { undici, error } = resolvePiUndici();
   if (!undici) {
     proxyState.installError = error;
@@ -179,6 +205,40 @@ function ensureProxyInstalled(): void {
     return;
   }
   const DispatcherBase = undici.Dispatcher;
+  const rotation = poolPresent
+    ? {
+        rotator: keyRotator,
+        getPoolKeys: () => keyPool.refresh(),
+        enabled: () => keyRotationState.enabled,
+        onSwitch: (info: { from: string; to: string; status: number }) => {
+          debug("nvidia-rotation-switch", `${maskKey(info.from)} → ${maskKey(info.to)}`, info);
+          proxyState.notify?.(
+            `NIM ${info.status}: ключ ${maskKey(info.from)} исчерпан — переключаюсь на ключ ${maskKey(info.to)} (ротация пула)`,
+            "info",
+          );
+        },
+        onDeadKey: (key: string, status: number) => {
+          debug("nvidia-rotation-dead", `ключ ${maskKey(key)} мёртв (${status})`, { ключ: maskKey(key), статус: status });
+          proxyState.notify?.(
+            `NIM ${status}: ключ ${maskKey(key)} мёртв — исключён из ротации до конца сессии`,
+            "warning",
+          );
+        },
+        onExhausted: (info: { attempts: number; status: number }) => {
+          debug("nvidia-rotation-exhausted", `${info.attempts} попыток — пул исчерпан`, info);
+          proxyState.notify?.(
+            `NIM ${info.status}: два круга ротации (${info.attempts} попыток) не помогли — отдаю ошибку пи. Статус пула: /nvidia-plus-keys`,
+            "warning",
+          );
+        },
+        onCooldownWait: (ms: number) => {
+          const seconds = Math.max(1, Math.round(ms / 1000));
+          debug("nvidia-rotation-wait", `все ключи в кулдауне, жду ${ms} мс`, {});
+          proxyState.notify?.(`NIM 429: все ключи пула в кулдауне — жду ${seconds} с (прерывается по Esc)`, "info");
+        },
+        log: (stage: string, label: string, payload: unknown) => debug(stage, label, payload),
+      }
+    : undefined;
   const result = ensureDispatcherInstalled(
     {
       getGlobalDispatcher: () => undici.getGlobalDispatcher(),
@@ -203,7 +263,8 @@ function ensureProxyInstalled(): void {
       },
     },
     {
-      proxyUrl: proxyState.url,
+      proxyUrl: proxyReady ? proxyState.url : undefined,
+      rotation,
       onObserved: (status, headers) => {
         debug("nvidia-response", `status=${status}`, { status, headers });
         if (status === 404 || status === 410) {
@@ -255,9 +316,14 @@ function ensureProxyInstalled(): void {
   );
   if (result.installed) {
     proxyState.installed = true;
-    debug("proxy-installed", proxyState.url.toString(), { fallback: "предыдущий глобальный диспетчер", повтор: transportRetryEnabled() });
+    keyRotationState.installedWithRotation = !!rotation;
+    debug(
+      "proxy-installed",
+      proxyReady ? proxyState.url!.toString() : "(без прокси — ротация ключей)",
+      { fallback: "предыдущий глобальный диспетчер", повтор: transportRetryEnabled(), ротация: !!rotation },
+    );
   } else {
-    debug("proxy-install-skip", proxyState.url.toString(), { already: result.already });
+    debug("proxy-install-skip", proxyReady ? proxyState.url!.toString() : "(без прокси)", { already: result.already });
   }
 }
 
@@ -290,10 +356,11 @@ function initProxyFromEnv(): void {
     proxyState.installError = parsed.error;
     return;
   }
-  if (!parsed.url) return; // без конфигурации поведение не меняется
-  proxyState.configured = true;
-  proxyState.url = parsed.url;
-  ensureProxyInstalled();
+  if (parsed.url) {
+    proxyState.configured = true;
+    proxyState.url = parsed.url;
+  }
+  ensureTransportInstalled(); // ставится и без прокси, если задан пул ключей (тикет 15)
   if (proxyState.installError) {
     proxyState.notify?.(`pi-nvidia-plus: ${proxyState.installError} — прокси не включён`, "error");
   }
@@ -329,17 +396,23 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) proxyState.notify = (m, t) => ctx.ui.notify(m, t);
-    if (proxyState.configured) {
-      // Пи мог пересоздать глобальный диспетчер до загрузки расширения.
-      ensureProxyInstalled();
-      if (ctx.hasUI && proxyState.url) {
-        if (proxyState.installError) {
-          ctx.ui.notify(`pi-nvidia-plus: прокси не включён — ${proxyState.installError}`, "error");
-        } else {
-          ctx.ui.notify(`pi-nvidia-plus: запросы NIM через прокси ${proxyState.url.toString().replace(/\/$/, "")}`, "info");
-          void preflightProxy();
-        }
+    // Пи мог пересоздать глобальный диспетчер до загрузки расширения.
+    ensureTransportInstalled();
+    if (proxyState.configured && ctx.hasUI && proxyState.url) {
+      if (proxyState.installError) {
+        ctx.ui.notify(`pi-nvidia-plus: прокси не включён — ${proxyState.installError}`, "error");
+      } else {
+        ctx.ui.notify(`pi-nvidia-plus: запросы NIM через прокси ${proxyState.url.toString().replace(/\/$/, "")}`, "info");
+        void preflightProxy();
       }
+    }
+    if (keyPool.hasSource() && ctx.hasUI) {
+      const poolSize = keyPool.refresh().length;
+      const state = keyRotationState.enabled ? "вкл" : "выкл (снимаем: /nvidia-plus-keys on)";
+      ctx.ui.notify(
+        `пи-нвидиа-плюс: ротация ключей NIM ${state} — пул ${keyPool.describe()}: ${poolSize} ключ(ей) + ключ пи первым. Статус: /nvidia-plus-keys`,
+        "info",
+      );
     }
     try {
       if (loadState()?.enabled === false) return; // погашено откатом
@@ -407,7 +480,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     lastNvidiaModelId = ctx.model.id;
     // Пи пересоздаёт глобальный диспетчер при /reload и смене настроек —
     // переустанавливаем обёртку лениво перед каждым запросом (идемпотентно).
-    ensureProxyInstalled();
+    ensureTransportInstalled();
     const payload = event.payload as Payload | null;
     if (!payload || typeof payload !== "object") return;
 
@@ -531,15 +604,18 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             ? `proxy ${proxyState.url?.toString() ?? "?"}: установлен, но ${proxyState.preflightError}`
             : `proxy ${proxyState.url?.toString() ?? "?"}${proxyState.installed ? " (установлен)" : ""}`
         : "proxy: не настроен (NVIDIA_NIM_PROXY)";
-      const retryState = proxyState.configured
+      const retryState = proxyState.configured || keyPool.hasSource()
         ? transportRetryEnabled()
           ? `прозрачный повтор 429/5xx: вкл (до ${TRANSPORT_RETRY.maxRetries} повторов)`
           : "прозрачный повтор 429/5xx: выкл (NVIDIA_NIM_TRANSPORT_RETRY)"
         : undefined;
+      const rotationState = keyPool.hasSource()
+        ? `ротация ключей: ${keyRotationState.enabled ? "вкл" : "выкл"} (пул ${keyPool.describe()}, ${keyPool.refresh().length} + ключ пи)`
+        : "ротация ключей: пул не задан";
       const model = ctx.model;
       if (!model || model.provider !== PROVIDER) {
         ctx.ui.notify(
-          `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}): current model is not nvidia (${model ? `${model.provider}/${model.id}` : "none"})`,
+          `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): current model is not nvidia (${model ? `${model.provider}/${model.id}` : "none"})`,
           "info",
         );
         return;
@@ -547,7 +623,55 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const level = ctx.thinkingLevel;
       const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
       ctx.ui.notify(
-        `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}): ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
+        `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
+        "info",
+      );
+    },
+  });
+
+  // ── Пул ключей NIM (тикет 15) ───────────────────────────────────────
+  pi.registerCommand("nvidia-plus-keys", {
+    description: "NIM key pool status; 'off'/'on' переключает ротацию в живой сессии",
+    handler: async (args, ctx) => {
+      const arg = (args ?? "").trim().toLowerCase();
+      if (arg === "off" || arg === "on") {
+        keyRotationState.enabled = arg === "on";
+        ctx.ui.notify(
+          `пи-нвидиа-плюс: ротация ключей ${arg === "on" ? "включена" : "выключена"} (среда: NVIDIA_NIM_KEY_ROTATION)`,
+          "info",
+        );
+        return;
+      }
+      const poolKeys = keyPool.refresh();
+      if (!keyPool.hasSource() && poolKeys.length === 0) {
+        ctx.ui.notify(
+          `пи-нвидиа-плюс: пул ключей не задан — создайте ~/.pi/agent/${DEFAULT_KEYS_FILE_NAME} ({"keys": ["nvapi-…", …]}) или задайте NVIDIA_NIM_KEYS[_FILE]; ротация не активна`,
+          "info",
+        );
+        return;
+      }
+      const piKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER).catch(() => undefined);
+      const ring = [...(piKey ? [piKey] : []), ...poolKeys.filter((k) => k !== piKey)];
+      const now = Date.now();
+      const rows = keyRotator.statusFor(ring, now).map((row, index) => {
+        const piMark = index === 0 && piKey ? " (ключ пи)" : "";
+        const state =
+          row.state === "dead"
+            ? "мёртв (401/403)"
+            : row.state === "cooldown"
+              ? `кулдаун ещё ${Math.max(1, Math.round(row.cooldownLeftMs / 1000))} с`
+              : row.active
+                ? "активен"
+                : "готов";
+        return `${row.masked}${piMark} — ${state}`;
+      });
+      const rotation = keyRotationState.enabled ? "вкл" : "выкл (включить: /nvidia-plus-keys on)";
+      const installedHint =
+        !keyRotationState.installedWithRotation && proxyState.installed
+          ? "; обёртка установлена без ротации — /reload или перезапуск подхватит пул"
+          : "";
+      ctx.ui.notify(
+        `пи-нвидиа-плюс: ротация ${rotation}; пул ${keyPool.describe()} (${poolKeys.length} + ключ пи); ${rows.join("; ")}. Каждый процесс пи ротирует независимо${installedHint}`,
         "info",
       );
     },
@@ -560,7 +684,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     description: "Live NIM discovery: GET /v1/models, add new chat models, mark missing known models",
     handler: async (_args, ctx) => {
       try {
-        ensureProxyInstalled();
+        ensureTransportInstalled();
         const headers: Record<string, string> = {};
         const apiKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER);
         if (apiKey) headers.Authorization = `Bearer ${apiKey}`;

@@ -19,6 +19,7 @@ import {
   withTransparentRetry,
   RETRYABLE_STATUSES,
 } from "../extensions/proxy.ts";
+import { KeyRotator } from "../extensions/keys.ts";
 
 // 1. parseProxyUrl
 {
@@ -504,6 +505,77 @@ function makeTarget(name: string) {
 
   wrapper.dispatch({ origin: "https://example.com" }, {});
   assert.equal(retryTarget.calls.length, 1, "не-nvidia мимо повторителя");
+}
+
+// 17. Регрессия (тикет 15): ни прокси, ни ротации — обёртка не ставится (байт-в-байт как сегодня).
+{
+  let current: unknown = makeTarget("prev-global");
+  const setCalls: unknown[] = [];
+  const result = ensureDispatcherInstalled(
+    {
+      getGlobalDispatcher: () => current,
+      setGlobalDispatcher: (d) => { current = d; setCalls.push(d); },
+      createProxyAgent: (url) => makeTarget(`agent:${url}`),
+    },
+    {}, // ни прокси, ни ротации, ни повтора — ставить нечего
+  );
+  assert.equal(result.installed, false, "нечего ставить");
+  assert.equal(result.already, false);
+  assert.equal(setCalls.length, 0, "глобальный диспетчер не тронут");
+  assert.strictEqual(current, current, "текущий диспетчер не заменён");
+}
+
+// 18. Ротация ставится БЕЗ прокси: nvidia-маршрут через прежний диспетчер, фолбэк — он же.
+{
+  const prevGlobal = makeTarget("prev-global");
+  let current: unknown = prevGlobal;
+  const result = ensureDispatcherInstalled(
+    {
+      getGlobalDispatcher: () => current,
+      setGlobalDispatcher: (d) => { current = d; },
+      createProxyAgent: () => {
+        throw new Error("прокси-агент не должен создаваться без прокси");
+      },
+    },
+    {
+      // без proxyUrl — только ротация: цель-основание = прежний глобальный диспетчер
+      rotation: {
+        rotator: new KeyRotator(),
+        getPoolKeys: () => [],
+        enabled: () => true,
+      },
+    },
+  );
+  assert.equal(result.installed, true, "ротация без прокси ставится");
+  assert.ok(isOurDispatcher(current));
+}
+
+// 19. Ротация поверх повтора: nvidia-запрос проходит повторитель, ротация видит конечный исход.
+{
+  let current: unknown = makeTarget("prev-global");
+  const retryTarget = makeTarget("retry-agent");
+  const result = ensureDispatcherInstalled(
+    {
+      getGlobalDispatcher: () => current,
+      setGlobalDispatcher: (d) => { current = d; },
+      createProxyAgent: (url) => makeTarget(`agent:${url}`),
+      createRetryAgent: () => retryTarget,
+    },
+    {
+      proxyUrl: new URL("http://192.168.88.248:8870/"),
+      retry: { maxRetries: 3, minDelayMs: 10, maxDelayMs: 100 },
+      rotation: {
+        rotator: new KeyRotator(),
+        getPoolKeys: () => [], // пул пуст → ротация пройдёт насквозь к повторителю
+        enabled: () => true,
+      },
+    },
+  );
+  assert.equal(result.installed, true);
+  const wrapper = current as { dispatch(opts: unknown, handler: unknown): boolean };
+  wrapper.dispatch({ origin: NVIDIA_ORIGIN, method: "POST", headers: { authorization: "Bearer nvapi-x" }, body: "{}" }, {});
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(retryTarget.calls.length, 1, "запрос дошёл до повторителя сквозь ротацию");
 }
 
 console.log("proxy: все проверки прошли");

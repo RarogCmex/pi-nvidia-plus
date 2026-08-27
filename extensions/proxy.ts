@@ -11,6 +11,7 @@
  *
  * Референс: `.scratch/pi-nvidia-plus/issues/04-proxy-mechanics.md` (вариант A).
  */
+import { KeyRotator, maskKey, type RotationRequest } from "./keys.ts";
 
 export const NVIDIA_ORIGIN = "https://integrate.api.nvidia.com";
 
@@ -139,6 +140,429 @@ export function describeProxyFailure(proxyUrl: string, cause: unknown): string {
 
 export interface DispatchTarget {
   dispatch(opts: unknown, handler: unknown): boolean;
+}
+
+/* ------------------------------------------------------------------ */
+/* Ротация ключей NIM (тикет 15)                                        */
+/* ------------------------------------------------------------------ */
+
+/** Кулдаун ключа без `retry-after` и потолок (рейт-лимиты NIM плавают). */
+export const DEFAULT_ROTATION_COOLDOWN_MS = 30_000;
+export const MAX_ROTATION_COOLDOWN_MS = 300_000;
+
+/** Ключ из заголовка `Authorization: Bearer …` (форма пи). */
+export function extractBearerKey(headers: unknown): string | undefined {
+  const auth = headersToRecord(headers).authorization;
+  if (!auth) return undefined;
+  const match = /^Bearer\s+(.+)$/i.exec(auth.trim());
+  const key = match?.[1]?.trim();
+  return key ? key : undefined;
+}
+
+/** Заменяет (или добавляет) `Authorization` на `Bearer <ключ>`; форма заголовков сохраняется. */
+export function withAuthorization(headers: unknown, key: string): unknown {
+  const value = `Bearer ${key}`;
+  if (Array.isArray(headers)) {
+    const out: unknown[] = [];
+    let replaced = false;
+    for (let i = 0; i + 1 < headers.length; i += 2) {
+      const name = headers[i];
+      if (typeof name === "string" && name.toLowerCase() === "authorization") {
+        out.push(name, value);
+        replaced = true;
+      } else {
+        out.push(name, headers[i + 1]);
+      }
+    }
+    if (!replaced) out.push("authorization", value);
+    return out;
+  }
+  if (headers && typeof headers === "object") {
+    const out: Record<string, unknown> = {};
+    let replaced = false;
+    for (const [name, entry] of Object.entries(headers as Record<string, unknown>)) {
+      if (name.toLowerCase() === "authorization") {
+        out[name] = value;
+        replaced = true;
+      } else {
+        out[name] = entry;
+      }
+    }
+    if (!replaced) out.authorization = value;
+    return out;
+  }
+  return { authorization: value };
+}
+
+/** Кулдаун ключа по заголовкам 429: `retry-after` есть — он, нет — дефолт; всегда под капом. */
+export function resolveCooldownMs(
+  headers: Record<string, string>,
+  config: { defaultCooldownMs?: number; maxCooldownMs?: number } = {},
+  now: number = Date.now(),
+): number {
+  const retryAfterMs = extractDiagnostics(429, headers, now)?.retryAfterMs;
+  const base = retryAfterMs ?? config.defaultCooldownMs ?? DEFAULT_ROTATION_COOLDOWN_MS;
+  const cap = config.maxCooldownMs ?? MAX_ROTATION_COOLDOWN_MS;
+  return Math.max(0, Math.min(base, cap));
+}
+
+/**
+ * Стабильный контроллер запроса (приём из штатного повторителя ундичи): один на
+ * все попытки ротации, пробрасывает паузу/резюм/аборт контроллеру текущего
+ * соединения. Точка приёма аборта пользователя: феррь зовёт `abort` именно сюда.
+ */
+export class RotationController {
+  target: {
+    pause?: () => void;
+    resume?: () => void;
+    abort?: (reason?: unknown) => void;
+    paused?: boolean;
+    rawHeaders?: unknown;
+  } | null = null;
+  /** `onRequestStart` проброшен вниз один раз на запрос. */
+  forwardedStart = false;
+  private _aborted = false;
+  private _reason: unknown = null;
+  private abortListeners = new Set<() => void>();
+
+  pause(): void {
+    this.target?.pause?.();
+  }
+  resume(): void {
+    this.target?.resume?.();
+  }
+  get paused(): boolean {
+    return this.target?.paused ?? false;
+  }
+  get aborted(): boolean {
+    return this._aborted;
+  }
+  get reason(): unknown {
+    return this._reason;
+  }
+  get rawHeaders(): unknown {
+    return this.target?.rawHeaders ?? null;
+  }
+  abort(reason?: unknown): void {
+    if (this._aborted) return;
+    this._aborted = true;
+    this._reason = reason;
+    for (const listener of [...this.abortListeners]) listener();
+    this.abortListeners.clear();
+    this.target?.abort?.(reason);
+  }
+  onAbortEvent(listener: () => void): () => void {
+    if (this._aborted) {
+      listener();
+      return () => {};
+    }
+    this.abortListeners.add(listener);
+    return () => this.abortListeners.delete(listener);
+  }
+}
+
+function interruptibleDelay(ms: number, controller: RotationController): Promise<boolean> {
+  if (controller.aborted) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const off = controller.onAbortEvent(() => {
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(true);
+    });
+    timer = setTimeout(() => {
+      off();
+      resolve(false);
+    }, ms);
+  });
+}
+
+export interface BufferedRotationResponse {
+  status: number;
+  headers: Record<string, string>;
+  statusMessage: unknown;
+  chunks: Uint8Array[];
+  trailers: unknown;
+}
+
+type RotationAttemptOutcome =
+  | { type: "buffered"; response: BufferedRotationResponse }
+  | { type: "delivered" }
+  | { type: "error"; error: unknown };
+
+/** Статусы, при которых ответ буферизуется и ключ может смениться. */
+const ROTATABLE_STATUSES = new Set([429, 401, 403]);
+
+/**
+ * Хендлер одной попытки: ротируемые статусы буферизует (ответ небольшой),
+ * остальное стримит в настоящий хендлер без задержки. Новый протокол ундичи 8 —
+   другой в диспетчерах ундичи и не принимается.
+ */
+function makeRotationAttemptHandler(
+  real: Record<string, unknown> | null,
+  controller: RotationController,
+  settle: (outcome: RotationAttemptOutcome) => void,
+): Record<string, unknown> {
+  let mode: "pending" | "buffering" | "streaming" = "pending";
+  let buffered: BufferedRotationResponse | undefined;
+  let settled = false;
+  const finish = (outcome: RotationAttemptOutcome): void => {
+    if (settled) return;
+    settled = true;
+    settle(outcome);
+  };
+  const call = (name: string, ...args: unknown[]): unknown => {
+    const fn = real?.[name];
+    if (typeof fn !== "function") return undefined;
+    return (fn as (...a: unknown[]) => unknown).apply(real, args);
+  };
+  return {
+    onRequestStart(conn: unknown, context: unknown) {
+      controller.target = conn as never;
+      if (!controller.forwardedStart && typeof real?.onRequestStart === "function") {
+        controller.forwardedStart = true;
+        call("onRequestStart", controller, context);
+      }
+    },
+    onResponseStarted() {
+      if (mode === "streaming") call("onResponseStarted");
+      // в буферизации не зовём: ответ может быть выброшен при смене ключа
+    },
+    onResponseStart(conn: unknown, status: number, headers: unknown, statusMessage: unknown) {
+      controller.target = conn as never;
+      if (ROTATABLE_STATUSES.has(status)) {
+        mode = "buffering";
+        buffered = { status, headers: headersToRecord(headers), statusMessage, chunks: [], trailers: undefined };
+        return;
+      }
+      mode = "streaming";
+      finish({ type: "delivered" });
+      call("onResponseStart", controller, status, headers, statusMessage);
+    },
+    onResponseData(_conn: unknown, chunk: unknown) {
+      if (mode === "streaming") return call("onResponseData", controller, chunk);
+      if (mode === "buffering" && buffered) {
+        buffered.chunks.push(chunk instanceof Uint8Array ? chunk : new TextEncoder().encode(String(chunk)));
+      }
+      return undefined;
+    },
+    onResponseEnd(trailers: unknown) {
+      if (mode === "streaming") return call("onResponseEnd", controller, trailers);
+      if (mode === "buffering" && buffered) {
+        buffered.trailers = trailers;
+        finish({ type: "buffered", response: buffered });
+      }
+      return undefined;
+    },
+    onResponseError(conn: unknown, err: unknown) {
+      if (conn) controller.target = conn as never;
+      if (mode === "streaming") {
+        call("onResponseError", controller, err);
+        return;
+      }
+      finish({ type: "error", error: err });
+    },
+    onRequestUpgrade(conn: unknown, status: number, headers: unknown, socket: unknown) {
+      controller.target = conn as never;
+      mode = "streaming";
+      finish({ type: "delivered" });
+      return call("onRequestUpgrade", controller, status, headers, socket);
+    },
+  };
+}
+
+function dispatchRotationAttempt(
+  target: DispatchTarget,
+  opts: Record<string, unknown>,
+  controller: RotationController,
+  real: Record<string, unknown> | null,
+): Promise<RotationAttemptOutcome> {
+  return new Promise((resolve) => {
+    const handler = makeRotationAttemptHandler(real, controller, resolve);
+    try {
+      target.dispatch(opts, handler);
+    } catch (err) {
+      resolve({ type: "error", error: err });
+    }
+  });
+}
+
+function deliverBufferedResponse(real: Record<string, unknown> | null, controller: RotationController, response: BufferedRotationResponse): void {
+  if (!real) return;
+  try {
+    const call = (name: string, ...args: unknown[]): void => {
+      const fn = real[name];
+      if (typeof fn === "function") (fn as (...a: unknown[]) => unknown).apply(real, args);
+    };
+    call("onResponseStarted");
+    call("onResponseStart", controller, response.status, response.headers, response.statusMessage);
+    for (const chunk of response.chunks) call("onResponseData", controller, chunk);
+    call("onResponseEnd", controller, response.trailers ?? {});
+  } catch {
+    // отдача не должна ронять цикл ротации
+  }
+}
+
+function deliverHandlerError(real: Record<string, unknown> | null, controller: RotationController, err: unknown): void {
+  if (!real) return;
+  try {
+    const fn = real.onResponseError;
+    if (typeof fn === "function") (fn as (...a: unknown[]) => unknown).apply(real, [controller, err]);
+  } catch {
+    // отдача не должна ронять цикл ротации
+  }
+}
+
+export interface RotationLayerOptions {
+  /** Сессионное состояние выбора ключей. */
+  rotator: KeyRotator;
+  /** Пул из файла/окружения (без ключа пи); зовётся на каждый запрос — горячая перезагрузка. */
+  getPoolKeys(): string[];
+  /** Аварийный выключатель (окружение + команда живой сессии). */
+  enabled(): boolean;
+  now?: () => number;
+  defaultCooldownMs?: number;
+  maxCooldownMs?: number;
+  /** Ключ сменился (уведомление входной точки; маскировка — там). */
+  onSwitch?: (info: { from: string; to: string; status: number }) => void;
+  /** Ключ умер 401/403. */
+  onDeadKey?: (key: string, status: number) => void;
+  /** Два круга пройдены — отдаём пи настоящий 429. */
+  onExhausted?: (info: { attempts: number; status: number }) => void;
+  /** Все ключи в кулдауне — ждём ближайший откат. */
+  onCooldownWait?: (ms: number) => void;
+  /** Отладочный лог; вызывающий обязан маскировать ключи (см. вызовы ниже). */
+  log?: (stage: string, label: string, payload: unknown) => void;
+}
+
+async function runRotationLoop(
+  target: DispatchTarget,
+  opts: Record<string, unknown>,
+  real: Record<string, unknown> | null,
+  request: RotationRequest,
+  options: RotationLayerOptions,
+): Promise<void> {
+  const now = (): number => (options.now ?? Date.now)();
+  const controller = new RotationController();
+
+  // Аборт запроса: сигнал в диспетчерских настройках (если транспорт его несёт) +
+  // контроллер, который феррь зовёт при прерывании пользователем.
+  const signal = opts.signal as { aborted?: unknown; addEventListener?: unknown; reason?: unknown; removeEventListener?: unknown } | undefined;
+  let removeSignalListener: (() => void) | undefined;
+  const hasSignal = !!signal && typeof signal.addEventListener === "function" && typeof signal.aborted === "boolean";
+  if (hasSignal) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else {
+      const onAbort = () => controller.abort(signal.reason);
+      (signal.addEventListener as (t: string, l: () => void, o?: unknown) => void)("abort", onAbort, { once: true });
+      removeSignalListener = () => (signal.removeEventListener as (t: string, l: () => void) => void)("abort", onAbort);
+    }
+  }
+
+  try {
+    const body = await bufferRequestBody(opts.body);
+    if (controller.aborted) return;
+
+    let lastKey: string | undefined;
+    let lastResponse: BufferedRotationResponse | undefined;
+    let attempts = 0;
+
+    for (;;) {
+      if (controller.aborted) return;
+      const pick = request.pick(now());
+      if (pick.kind === "exhausted") {
+        if (lastResponse) {
+          options.onExhausted?.({ attempts, status: lastResponse.status });
+          options.log?.("rotation-exhausted", `2 круга пройдены (${attempts} попыток) — отдаю ${lastResponse.status}`, {});
+          deliverBufferedResponse(real, controller, lastResponse);
+        } else {
+          // Все ключи мертвы ещё до первой попытки: ведём себя как сегодня.
+          target.dispatch({ ...opts, body }, real);
+        }
+        return;
+      }
+      if (pick.kind === "wait") {
+        options.onCooldownWait?.(pick.ms);
+        options.log?.("rotation-wait", `все ключи в кулдауне, жду ${pick.ms} мс`, {});
+        const aborted = await interruptibleDelay(pick.ms, controller);
+        if (aborted || controller.aborted) return;
+        continue;
+      }
+
+      const key = pick.key;
+      attempts += 1;
+      if (lastKey !== undefined && lastKey !== key) {
+        options.onSwitch?.({ from: lastKey, to: key, status: lastResponse?.status ?? 429 });
+      }
+      options.log?.("rotation-attempt", `попытка ${attempts}, ключ ${maskKey(key)}`, { ключ: maskKey(key) });
+      const attemptOpts: Record<string, unknown> = {
+        ...opts,
+        headers: withAuthorization(opts.headers, key),
+        body,
+      };
+      const outcome = await dispatchRotationAttempt(target, attemptOpts, controller, real);
+      if (controller.aborted) return;
+      if (outcome.type === "delivered") {
+        options.rotator.markDelivered(key);
+        options.log?.("rotation-delivered", `ответ ушёл в пи, ключ ${maskKey(key)}`, {});
+        return;
+      }
+      if (outcome.type === "error") {
+        deliverHandlerError(real, controller, outcome.error);
+        return;
+      }
+      lastResponse = outcome.response;
+      lastKey = key;
+      if (outcome.response.status === 401 || outcome.response.status === 403) {
+        options.rotator.markDead(key);
+        options.onDeadKey?.(key, outcome.response.status);
+        options.log?.("rotation-dead", `ключ ${maskKey(key)} мёртв (${outcome.response.status})`, {});
+        continue;
+      }
+      const cooldownMs = resolveCooldownMs(outcome.response.headers, options, now());
+      options.rotator.markRateLimited(key, cooldownMs, now());
+      options.log?.("rotation-cooldown", `ключ ${maskKey(key)} в кулдауне ${cooldownMs} мс`, {});
+    }
+  } finally {
+    removeSignalListener?.();
+  }
+}
+
+/**
+ * Цель-диспетчер с ротацией ключей: ставится НАД прозрачным повтором (на каждый
+ * ключ сначала бюджет повторов тикета 14, потом смена ключа). Выключена/пул не
+ * готов — запрос проходит в цель как есть (поведение как сегодня).
+ */
+export function withKeyRotation(target: DispatchTarget, options: RotationLayerOptions): SelectiveDispatcherHandle {
+  return {
+    dispatch(opts: unknown, handler: unknown): boolean {
+      let passthrough = false;
+      let request: RotationRequest | undefined;
+      try {
+        if (!options.enabled()) {
+          passthrough = true;
+        } else {
+          const requestKey = extractBearerKey((opts as { headers?: unknown } | null)?.headers);
+          options.rotator.setPool(options.getPoolKeys());
+          request = options.rotator.beginRequest(requestKey, (options.now ?? Date.now)());
+          if (!request.isUseful()) passthrough = true;
+        }
+      } catch {
+        passthrough = true; // подготовка не должна ломать запрос
+      }
+      if (passthrough || !request) return target.dispatch(opts, handler);
+      const real = (handler && typeof handler === "object" ? handler : null) as Record<string, unknown> | null;
+      void runRotationLoop(target, (opts ?? {}) as Record<string, unknown>, real, request, options).catch((err) => {
+        deliverHandlerError(real, new RotationController(), err);
+      });
+      return true;
+    },
+    close(): Promise<void> {
+      return Promise.resolve((target as { close?: () => Promise<void> }).close?.());
+    },
+    destroy(): Promise<void> {
+      return Promise.resolve((target as { destroy?: () => Promise<void> }).destroy?.());
+    },
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -297,8 +721,8 @@ export interface SelectiveDispatcherOptions {
   nvidia: DispatchTarget;
   /** Прежний глобальный диспетчер — для всего остального трафика. */
   fallback: DispatchTarget;
-  /** Адрес прокси — для понятных сообщений об ошибках. */
-  proxyUrl: string;
+  /** Адрес прокси — для понятных сообщений об ошибках; `undefined` — маршрут без прокси (ошибки соединения не переписываются). */
+  proxyUrl?: string;
   /** Вызывается на каждый ответ NIM (после парсинга заголовков). */
   onObserved?: (status: number, headers: Record<string, string>) => void;
   /** Вызывается для ответов 429/5xx. */
@@ -318,7 +742,7 @@ const wrappedHandlers = new WeakSet<object>();
  */
 function wrapHandler(
   handler: unknown,
-  proxyUrl: string,
+  proxyUrl: string | undefined,
   onObserved?: (status: number, headers: Record<string, string>) => void,
   onDiagnostic?: (diagnostic: NimDiagnostic) => void,
   onProxyError?: (message: string, cause: unknown) => void,
@@ -338,6 +762,8 @@ function wrapHandler(
   };
 
   const rewriteError = (err: unknown): unknown => {
+    // Без прокси ошибки соединения не переписываются: это обычный маршрут.
+    if (!proxyUrl) return err;
     if (!isProxyConnectError(err)) return err;
     const message = describeProxyFailure(proxyUrl, err);
     const wrapped = new Error(message);
@@ -446,12 +872,15 @@ export interface DispatcherDeps {
 }
 
 export interface InstallOptions {
-  proxyUrl: URL;
+  /** Прокси `NVIDIA_NIM_PROXY`. Без него (но при заданной ротации) nvidia-маршрут идёт через прежний глобальный диспетчер. */
+  proxyUrl?: URL;
   onObserved?: (status: number, headers: Record<string, string>) => void;
   onDiagnostic?: (diagnostic: NimDiagnostic) => void;
   onProxyError?: (message: string, cause: unknown) => void;
   /** Включает прозрачный транспортный повтор 429/5xx (нужен `deps.createRetryAgent`). */
   retry?: TransportRetryConfig;
+  /** Включает ротацию ключей NIM (тикет 15); ставится поверх повтора. */
+  rotation?: RotationLayerOptions;
 }
 
 export interface InstallResult {
@@ -468,16 +897,23 @@ export interface InstallResult {
 export function ensureDispatcherInstalled(deps: DispatcherDeps, options: InstallOptions): InstallResult {
   const current = deps.getGlobalDispatcher();
   if (isOurDispatcher(current)) return { installed: false, already: true, dispatcher: current };
-  const proxyAgent = deps.createProxyAgent(options.proxyUrl);
+  // Нечего ставить: ни прокси, ни ротации — поведение как сегодня, обёртка не нужна.
+  if (!options.proxyUrl && !options.rotation) return { installed: false, already: false };
+  // Основание nvidia-маршрута: прокси-агент, либо (без прокси) прежний глобальный диспетчер.
+  const base: DispatchTarget = options.proxyUrl
+    ? deps.createProxyAgent(options.proxyUrl)
+    : (current as DispatchTarget);
   // Прозрачный повтор 429/5xx: наблюдатель выше повторителя и видит только конечный исход.
-  const nvidiaTarget =
+  const retried =
     options.retry && deps.createRetryAgent
-      ? withTransparentRetry(proxyAgent, options.retry, { createRetryAgent: deps.createRetryAgent })
-      : proxyAgent;
+      ? withTransparentRetry(base, options.retry, { createRetryAgent: deps.createRetryAgent })
+      : base;
+  // Ротация ключей — поверх повтора: на каждый ключ сначала бюджет повторов, потом смена.
+  const nvidiaTarget = options.rotation ? withKeyRotation(retried, options.rotation) : retried;
   const duck = createSelectiveDispatcher({
     nvidia: nvidiaTarget,
     fallback: current as DispatchTarget,
-    proxyUrl: options.proxyUrl.toString(),
+    proxyUrl: options.proxyUrl?.toString(),
     onObserved: options.onObserved,
     onDiagnostic: options.onDiagnostic,
     onProxyError: options.onProxyError,
