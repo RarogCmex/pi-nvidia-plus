@@ -195,12 +195,15 @@ function ensureProxyInstalled(): void {
       onObserved: (status, headers) => {
         debug("nvidia-response", `status=${status}`, { status, headers });
         if (status === 404 || status === 410) {
-          const key = `${status}:${lastNvidiaModelId ?? "?"}`;
+          // Уведомляем только для запросов с известной моделью: внутренние запросы
+          // без модельного контекста (префлайт, дискавери) не должны пугать пользователя.
+          if (!lastNvidiaModelId) return;
+          const key = `${status}:${lastNvidiaModelId}`;
           if (!notifiedDeadResponses.has(key)) {
             notifiedDeadResponses.add(key);
-            const dead = lastNvidiaModelId ? DEAD_MODELS[lastNvidiaModelId] : undefined;
+            const dead = DEAD_MODELS[lastNvidiaModelId];
             proxyState.notify?.(
-              `NIM ${status}: ${lastNvidiaModelId ?? "запрос к nvidia"}${dead ? ` — помечена мёртвой (${dead})` : " — модели с таким id нет в живом каталоге"}. Попробуйте другую модель.`,
+              `NIM ${status}: ${lastNvidiaModelId}${dead ? ` — помечена мёртвой (${dead})` : " — модели с таким id нет в живом каталоге"}. Попробуйте другую модель.`,
               "warning",
             );
           }
@@ -232,8 +235,10 @@ async function preflightProxy(): Promise<void> {
   if (!proxyState.configured || proxyState.preflightDone || !proxyState.url) return;
   proxyState.preflightDone = true;
   try {
-    // Любой HTTP-ответ (включая 401/404) — прокси достижим.
-    await fetch("https://integrate.api.nvidia.com/", { signal: AbortSignal.timeout(10_000) });
+    // Любой HTTP-ответ — прокси достижим. Идём на `/v1/models` (200 без
+    // авторизации), а не на корень: корень отдаёт 404, и наблюдатель не должен
+    // показывать пользователю ложное предупреждение о мёртвой модели.
+    await fetch(`${NVIDIA_ORIGIN}/v1/models`, { signal: AbortSignal.timeout(10_000) });
   } catch (e) {
     const cause = (e as { cause?: unknown } | null)?.cause ?? e;
     if (isProxyConnectError(e) || isProxyConnectError(cause)) {
@@ -337,7 +342,12 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   pi.on("model_select", (event, ctx) => {
     if (!ctx.hasUI) return;
     ctx.ui.setStatus("nvidia-plus", statusLine(ctx));
-    if (event.model.provider !== PROVIDER) return;
+    if (event.model.provider !== PROVIDER) {
+      // При уходе на другой провайдер модельный контекст nvidia сбрасывается,
+      // чтобы фоновые запросы без модели не приписывались старой модели.
+      lastNvidiaModelId = undefined;
+      return;
+    }
     const dead = DEAD_MODELS[event.model.id];
     if (dead) {
       ctx.ui.notify(
