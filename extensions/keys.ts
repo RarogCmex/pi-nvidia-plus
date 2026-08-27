@@ -337,15 +337,26 @@ export class RotationRequest {
   }
 }
 
+export interface KeyRotatorOptions {
+  /** Источник псевдослучайности в [0,1) — для тестов; по умолчанию `Math.random`. */
+  random?: () => number;
+}
+
 /**
  * Состояние ротации на сессию: пул, кулдауны, мёртвые, липкий ключ.
- * `beginRequest` заводит кольцо на запрос (ключ пи первым).
+ * `beginRequest` заводит кольцо на запрос: ключ пи первый, хвост пула
+ * развёрнут псевдослучайным циклическим сдвигом (см. `beginRequest`).
  */
 export class KeyRotator {
   private pool: string[] = [];
   private cooldownUntil = new Map<string, number>();
   private dead = new Set<string>();
   private active: string | undefined;
+  private readonly random: () => number;
+
+  constructor(opts?: KeyRotatorOptions) {
+    this.random = opts?.random ?? Math.random;
+  }
 
   /** Пул из файла/окружения (без ключа пи). Дубликаты убираются, порядок сохраняется. */
   setPool(keys: string[]): void {
@@ -369,12 +380,34 @@ export class KeyRotator {
     return Math.max(0, (this.cooldownUntil.get(key) ?? 0) - now);
   }
 
-  /** Новое кольцо запроса: ключ пи первым, дубликаты с пулом убираются. */
+  /**
+   * Новое кольцо запроса: ключ пи первым, дубликаты с пулом убираются.
+   * Хвост кольца (пул) разворачивается псевдослучайным циклическим сдвигом,
+   * чтобы параллельные агенты входили в круг с разных ключей и не бились
+   * друг с другом за один и тот же первый живой ключ (меньше коллизий и 429).
+   * Порядок внутри круга и липкость активного ключа не меняются.
+   */
   beginRequest(requestKey: string | undefined, _now: number): RotationRequest {
     const ring: string[] = [];
     if (requestKey) ring.push(requestKey);
     for (const key of this.pool) if (!ring.includes(key)) ring.push(key);
-    return new RotationRequest(this, ring);
+    return new RotationRequest(this, this.circularShift(ring, requestKey));
+  }
+
+  /**
+   * Циклический псевдослучайный сдвиг хвоста кольца: ключ пи (якорь) остаётся
+   * первым, а пул разворачивается на случайное смещение — круг обходится по
+   * порядку, но вход в него случайный. Пул из 0–1 ключа сдвигать нечего.
+   */
+  private circularShift(ring: string[], anchor: string | undefined): string[] {
+    const anchored = anchor !== undefined && ring.length > 0 && ring[0] === anchor;
+    const start = anchored ? 1 : 0;
+    const tail = ring.slice(start);
+    if (tail.length < 2) return ring;
+    const offset = Math.floor(this.random() * tail.length);
+    if (offset === 0) return ring;
+    const rotated = tail.slice(offset).concat(tail.slice(0, offset));
+    return anchored ? [ring[0], ...rotated] : rotated;
   }
 
   /** 429: ключ в кулдауне на время из `retry-after` (транспорт уже посчитал мс). */

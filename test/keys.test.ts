@@ -217,7 +217,7 @@ function keys(pick: RotationPick): string | undefined {
 
 // 13. Кольцо запроса: ключ пи первый, дубликаты убираются; липкий старт.
 {
-  const r = new KeyRotator();
+  const r = new KeyRotator({ random: () => 0 });
   r.setPool(["nvapi-pi", "nvapi-b", "nvapi-c"]); // nvapi-pi дублирует ключ пи
   const req = r.beginRequest("nvapi-pi", 0);
   assert.deepEqual(
@@ -230,7 +230,7 @@ function keys(pick: RotationPick): string | undefined {
 
 // 14. Липкость: успешный ключ остаётся активным между запросами.
 {
-  const r = new KeyRotator();
+  const r = new KeyRotator({ random: () => 0 });
   r.setPool(["nvapi-b", "nvapi-c"]);
   let req = r.beginRequest("nvapi-pi", 0);
   assert.equal(keys(req.pick(0)), "nvapi-pi");
@@ -262,7 +262,7 @@ function keys(pick: RotationPick): string | undefined {
 
 // 16. Круговой обход: порядок кольца [ключ пи, ...пул], пропуск в кулдауне.
 {
-  const r = new KeyRotator();
+  const r = new KeyRotator({ random: () => 0 });
   r.setPool(["nvapi-b", "nvapi-c"]);
   const req = r.beginRequest("nvapi-pi", 0);
   assert.equal(keys(req.pick(0)), "nvapi-pi");
@@ -275,9 +275,26 @@ function keys(pick: RotationPick): string | undefined {
   assert.equal(wait.kind, "wait", "все в кулдауне — ждать");
 }
 
+// 16b. Псевдослучайный вход в круг: ключ пи остаётся первым, пул развёрнут на случайное смещение; обход по-прежнему круговой.
+{
+  const r = new KeyRotator({ random: () => 0.999 }); // смещение 1 на пуле [b, c] → хвост [c, b]
+  r.setPool(["nvapi-b", "nvapi-c"]);
+  const req = r.beginRequest("nvapi-pi", 0);
+  assert.deepEqual(
+    req.report(0).map((k) => k.masked),
+    [maskKey("nvapi-pi"), maskKey("nvapi-c"), maskKey("nvapi-b")],
+    "пул развёрнут случайным сдвигом, ключ пи первый",
+  );
+  assert.equal(keys(req.pick(0)), "nvapi-pi", "первый по-прежнему ключ пи");
+  r.markRateLimited("nvapi-pi", 60_000, 0);
+  assert.equal(keys(req.pick(0)), "nvapi-c", "вход в круг со случайной позиции");
+  r.markRateLimited("nvapi-c", 60_000, 0);
+  assert.equal(keys(req.pick(0)), "nvapi-b", "далее по кругу без пропусков");
+}
+
 // 17. Мёртвые 401/403: ключ исключается до конца сессии, не считается в кольце.
 {
-  const r = new KeyRotator();
+  const r = new KeyRotator({ random: () => 0 });
   r.setPool(["nvapi-b", "nvapi-c"]);
   let req = r.beginRequest("nvapi-pi", 0);
   assert.equal(keys(req.pick(0)), "nvapi-pi");
@@ -357,7 +374,7 @@ function keys(pick: RotationPick): string | undefined {
 
 // 21. Мёртвый посреди запроса ключ не раздувает круги: потолок — две попытки на живой ключ.
 {
-  const r = new KeyRotator();
+  const r = new KeyRotator({ random: () => 0 });
   r.setPool(["nvapi-b", "nvapi-c"]);
   const req = r.beginRequest("nvapi-pi", 0);
   assert.equal(keys(req.pick(0)), "nvapi-pi");
