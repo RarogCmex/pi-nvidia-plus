@@ -360,7 +360,8 @@ function makeTarget(name: string) {
   assert.strictEqual(await bufferRequestBody(odd), odd);
 }
 
-// 12. resolveRetryDelayMs: retry-after-ms > retry-after (секунды и дата) > экспонента; кап.
+// 12. resolveRetryDelayMs: retry-after-ms > retry-after (секунды и дата), но не ниже
+// minDelayMs (плоская задержка без роста; живой NIM заголовки в 429 не даёт); кап.
 {
   const cfg = { minDelayMs: 500, maxDelayMs: 30_000 };
   const now = Date.UTC(2026, 7, 27, 12, 0, 0);
@@ -369,10 +370,11 @@ function makeTarget(name: string) {
   assert.equal(resolveRetryDelayMs({ "retry-after-ms": "1200", "retry-after": "99" }, 1, cfg, now), 1200, "retry-after-ms первичен");
   assert.equal(resolveRetryDelayMs({ "retry-after": "7" }, 1, cfg, now), 7000);
   assert.equal(resolveRetryDelayMs({ "retry-after": "Wed, 27 Aug 2026 12:00:05 GMT" }, 1, cfg, now), 5000, "HTTP-дата");
-  assert.equal(resolveRetryDelayMs({}, 1, cfg, now), 500, "экспонента: попытка 1");
-  assert.equal(resolveRetryDelayMs({}, 3, cfg, now), 2000, "экспонента: попытка 3");
+  assert.equal(resolveRetryDelayMs({}, 1, cfg, now), 500, "без заголовка — минимальная задержка");
+  assert.equal(resolveRetryDelayMs({}, 3, cfg, now), 500, "плоская: попытка 3 не растёт");
+  assert.equal(resolveRetryDelayMs({ "retry-after-ms": "100" }, 1, cfg, now), 500, "короткий заголовок — пол из minDelayMs");
   assert.equal(resolveRetryDelayMs({ "retry-after-ms": "999999" }, 1, cfg, now), 30_000, "кап сверху");
-  assert.equal(resolveRetryDelayMs({ "retry-after-ms": "-5" }, 1, cfg, now), 0, "отрицательное — в ноль");
+  assert.equal(resolveRetryDelayMs({ "retry-after-ms": "-5" }, 1, cfg, now), 500, "отрицательный заголовок — пол");
 }
 
 // 13. makeNvidiaRetryFunction: решение о повторе.

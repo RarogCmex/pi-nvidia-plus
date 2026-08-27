@@ -115,6 +115,7 @@ function makeRotation(opts: {
   enabled?: boolean;
   respond: Responder;
   now?: () => number;
+  cooldown?: { defaultCooldownMs?: number; maxCooldownMs?: number; minCooldownMs?: number };
   onSwitch?: (info: { from: string; to: string; status: number }) => void;
   onDeadKey?: (key: string, status: number) => void;
   onExhausted?: (info: { attempts: number; status: number }) => void;
@@ -127,6 +128,7 @@ function makeRotation(opts: {
     getPoolKeys: () => opts.poolKeys ?? [],
     enabled: () => opts.enabled ?? true,
     now: opts.now,
+    ...opts.cooldown,
     onSwitch: opts.onSwitch,
     onDeadKey: opts.onDeadKey,
     onExhausted: opts.onExhausted,
@@ -163,14 +165,14 @@ function makeRotation(opts: {
   assert.deepEqual(withAuthorization(undefined, "k"), { authorization: "Bearer k" });
 }
 
-// 1.3 Кулдаун: retry-after > дефолт, кап сверху.
+// 1.3 Кулдаун: дефолт без заголовка, пол 2 с, кап сверху.
 {
-  assert.equal(resolveCooldownMs({ "retry-after-ms": "1200" }), 1200);
+  assert.equal(resolveCooldownMs({ "retry-after-ms": "1200" }), 2000, "короткий заголовок — пол 2 с");
   assert.equal(resolveCooldownMs({ "retry-after": "7" }), 7000);
   assert.equal(resolveCooldownMs({}), DEFAULT_ROTATION_COOLDOWN_MS, "нет заголовка — дефолт");
   assert.equal(resolveCooldownMs({ "retry-after": "99999" }), MAX_ROTATION_COOLDOWN_MS, "кап");
   assert.equal(
-    resolveCooldownMs({ "retry-after-ms": "500" }, { defaultCooldownMs: 100, maxCooldownMs: 400 }),
+    resolveCooldownMs({ "retry-after-ms": "500" }, { defaultCooldownMs: 100, maxCooldownMs: 400, minCooldownMs: 0 }),
     400,
     "настройки переопределяются",
   );
@@ -308,6 +310,7 @@ function makeRotation(opts: {
     poolKeys: ["nvapi-b"],
     respond: () => ({ status: 429, headers: { "retry-after-ms": "10" }, body: '{"error":"устойчивый 429"}' }),
     now: () => clock,
+    cooldown: { minCooldownMs: 0 }, // пол кулдауна проверен отдельно (тест 1.3) — тут чистые круги на коротком кулдауне
     onExhausted: (info) => exhausted.push(info),
     onCooldownWait: (ms) => waits.push(ms),
   });

@@ -145,7 +145,9 @@ let lastNvidiaModelId: string | undefined;
 
 // Прозрачный транспортный повтор 429/5xx (тикет 14): короткие рейт-лимиты и
 // шлюзовые ошибки повторяются под наблюдателем, и пи с моделью их не видят.
-const TRANSPORT_RETRY = { maxRetries: 3, minDelayMs: 500, maxDelayMs: 30_000 } as const;
+// Темп (живое замечание тикета 15): 4 попытки на ключ с плоской задержкой 2 с —
+// живой NIM заголовки в 429 не даёт, а рейт-лимит на аккаунт плавает.
+const TRANSPORT_RETRY = { maxRetries: 3, minDelayMs: 2_000, maxDelayMs: 30_000 } as const;
 function transportRetryEnabled(): boolean {
   const raw = process.env.NVIDIA_NIM_TRANSPORT_RETRY?.trim().toLowerCase();
   return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");

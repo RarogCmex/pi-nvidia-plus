@@ -146,9 +146,10 @@ export interface DispatchTarget {
 /* Ротация ключей NIM (тикет 15)                                        */
 /* ------------------------------------------------------------------ */
 
-/** Кулдаун ключа без `retry-after` и потолок (рейт-лимиты NIM плавают). */
+/** Кулдаун ключа без `retry-after`, потолок и пол (рейт-лимиты NIM плавают). */
 export const DEFAULT_ROTATION_COOLDOWN_MS = 30_000;
 export const MAX_ROTATION_COOLDOWN_MS = 300_000;
+export const MIN_ROTATION_COOLDOWN_MS = 2_000;
 
 /** Ключ из заголовка `Authorization: Bearer …` (форма пи). */
 export function extractBearerKey(headers: unknown): string | undefined {
@@ -194,16 +195,17 @@ export function withAuthorization(headers: unknown, key: string): unknown {
   return { authorization: value };
 }
 
-/** Кулдаун ключа по заголовкам 429: `retry-after` есть — он, нет — дефолт; всегда под капом. */
+/** Кулдаун ключа по заголовкам 429: `retry-after` есть — он (но не ниже пола), нет — дефолт; всегда под капом. */
 export function resolveCooldownMs(
   headers: Record<string, string>,
-  config: { defaultCooldownMs?: number; maxCooldownMs?: number } = {},
+  config: { defaultCooldownMs?: number; maxCooldownMs?: number; minCooldownMs?: number } = {},
   now: number = Date.now(),
 ): number {
   const retryAfterMs = extractDiagnostics(429, headers, now)?.retryAfterMs;
+  const floor = config.minCooldownMs ?? MIN_ROTATION_COOLDOWN_MS;
   const base = retryAfterMs ?? config.defaultCooldownMs ?? DEFAULT_ROTATION_COOLDOWN_MS;
   const cap = config.maxCooldownMs ?? MAX_ROTATION_COOLDOWN_MS;
-  return Math.max(0, Math.min(base, cap));
+  return Math.max(floor, Math.min(base, cap));
 }
 
 /**
@@ -618,29 +620,36 @@ export async function bufferRequestBody(body: unknown): Promise<unknown> {
 }
 
 /**
- * Задержка перед повтором: `retry-after-ms` (заголовок NIM) > `retry-after`
- * (секунды или HTTP-дата) > экспоненциальный откат; всегда в пределах `[0, maxDelayMs]`.
+ * Задержка перед повтором: `retry-after-ms`/`retry-after` NIM уважается, но не ниже
+ * `minDelayMs` (живой NIM заголовки в 429 не даёт вовсе, а рейт-лимит плавает —
+ * слишком частые повторы только кормят ограничитель); потолок — `maxDelayMs`.
+ * Без заголовка — плоская задержка `minDelayMs` на каждый повтор.
  */
 export function resolveRetryDelayMs(
   headers: Record<string, string>,
-  attempt: number,
+  _attempt: number,
   config: { minDelayMs: number; maxDelayMs: number },
   now: number = Date.now(),
 ): number {
-  const clamp = (value: number): number => Math.max(0, Math.min(value, config.maxDelayMs));
+  let fromHeader: number | undefined;
   const ms = headers["retry-after-ms"];
   if (ms !== undefined) {
     const value = Number.parseFloat(ms);
-    if (Number.isFinite(value)) return clamp(value);
+    if (Number.isFinite(value)) fromHeader = value;
   }
-  const raw = headers["retry-after"];
-  if (raw !== undefined) {
-    const seconds = Number.parseFloat(raw);
-    if (!Number.isNaN(seconds)) return clamp(seconds * 1000);
-    const date = Date.parse(raw);
-    if (!Number.isNaN(date)) return clamp(date - now);
+  if (fromHeader === undefined) {
+    const raw = headers["retry-after"];
+    if (raw !== undefined) {
+      const seconds = Number.parseFloat(raw);
+      if (!Number.isNaN(seconds)) fromHeader = seconds * 1000;
+      else {
+        const date = Date.parse(raw);
+        if (!Number.isNaN(date)) fromHeader = date - now;
+      }
+    }
   }
-  return clamp(config.minDelayMs * 2 ** Math.max(0, attempt - 1));
+  const base = Math.max(fromHeader ?? config.minDelayMs, config.minDelayMs);
+  return Math.min(base, config.maxDelayMs);
 }
 
 export interface RetryDecisionContext {
