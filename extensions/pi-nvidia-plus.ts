@@ -33,6 +33,9 @@
  * на 401/403 — исключается до конца сессии; аварийные выключатели —
  * `NVIDIA_NIM_KEY_ROTATION=0` и `/nvidia-plus-keys off|on`. При выключенном прозрачном
  * повторе (`NVIDIA_NIM_TRANSPORT_RETRY=0`) ротация вырождается в переключение на первый же 429.
+ *
+ * Наблюдаемость (тикет 16): прокси-интро и префлайт — только при выбранной модели `nvidia`
+ * (на старте сессии или при выборе); на не-`nvidia` сессиях расширение себя не проявляет.
  */
 import { appendFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
@@ -182,6 +185,21 @@ function notifyRotationIntro(ui: { notify: (message: string, type?: "info" | "wa
     `пи-нвидиа-плюс: ротация ключей NIM ${state} — пул ${keyPool.describe()}: ${poolSize} ключ(ей) + ключ пи первым. Статус: /nvidia-plus-keys`,
     "info",
   );
+}
+
+// Прокси-интро (тикет 16) — один раз и только при выбранной модели nvidia:
+// на старте сессии (если она уже стоит) или при выборе модели. На не-`nvidia`
+// сессиях расширение не должно проявляться (критерий приёмки №5).
+let proxyIntroNotified = false;
+function notifyProxyIntro(ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }): void {
+  if (proxyIntroNotified || !proxyState.configured || !proxyState.url) return;
+  proxyIntroNotified = true;
+  if (proxyState.installError) {
+    ui.notify(`pi-nvidia-plus: прокси не включён — ${proxyState.installError}`, "error");
+    return;
+  }
+  ui.notify(`pi-nvidia-plus: запросы NIM через прокси ${proxyState.url.toString().replace(/\/$/, "")}`, "info");
+  void preflightProxy();
 }
 
 function resolvePiUndici(): { undici?: any; error?: string } {
@@ -420,15 +438,9 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     if (ctx.hasUI) proxyState.notify = (m, t) => ctx.ui.notify(m, t);
     // Пи мог пересоздать глобальный диспетчер до загрузки расширения.
     ensureTransportInstalled();
-    if (proxyState.configured && ctx.hasUI && proxyState.url) {
-      if (proxyState.installError) {
-        ctx.ui.notify(`pi-nvidia-plus: прокси не включён — ${proxyState.installError}`, "error");
-      } else {
-        ctx.ui.notify(`pi-nvidia-plus: запросы NIM через прокси ${proxyState.url.toString().replace(/\/$/, "")}`, "info");
-        void preflightProxy();
-      }
-    }
+    // Прокси и ротация представляются только при выбранной модели nvidia (тикет 16).
     if (ctx.hasUI && ctx.model?.provider === PROVIDER) {
+      notifyProxyIntro(ctx.ui);
       notifyRotationIntro(ctx.ui);
     }
     try {
@@ -468,6 +480,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       lastNvidiaModelId = undefined;
       return;
     }
+    notifyProxyIntro(ctx.ui);
     notifyRotationIntro(ctx.ui);
     const dead = DEAD_MODELS[event.model.id];
     if (dead) {
