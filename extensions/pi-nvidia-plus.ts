@@ -47,6 +47,7 @@ import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscove
 import { transformRequest, thinkingPlan, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
+import { t } from "./i18n.ts";
 import {
   parseProxyUrl,
   ensureDispatcherInstalled,
@@ -180,9 +181,9 @@ function notifyRotationIntro(ui: { notify: (message: string, type?: "info" | "wa
   if (rotationIntroNotified || !keyPool.hasSource()) return;
   rotationIntroNotified = true;
   const poolSize = keyPool.refresh().length;
-  const state = keyRotationState.enabled ? "вкл" : "выкл (снимаем: /nvidia-plus-keys on)";
+  const state = keyRotationState.enabled ? t("rotationStateOn") : t("rotationStateOff");
   ui.notify(
-    `пи-нвидиа-плюс: ротация ключей NIM ${state} — пул ${keyPool.describe()}: ${poolSize} ключ(ей) + ключ пи первым. Статус: /nvidia-plus-keys`,
+    t("rotationIntro", { state, source: keyPool.describe(), count: poolSize }),
     "info",
   );
 }
@@ -195,10 +196,10 @@ function notifyProxyIntro(ui: { notify: (message: string, type?: "info" | "warni
   if (proxyIntroNotified || !proxyState.configured || !proxyState.url) return;
   proxyIntroNotified = true;
   if (proxyState.installError) {
-    ui.notify(`pi-nvidia-plus: прокси не включён — ${proxyState.installError}`, "error");
+    ui.notify(t("proxyNotEnabled", { error: proxyState.installError }), "error");
     return;
   }
-  ui.notify(`pi-nvidia-plus: запросы NIM через прокси ${proxyState.url.toString().replace(/\/$/, "")}`, "info");
+  ui.notify(t("proxyIntro", { url: proxyState.url.toString().replace(/\/$/, "") }), "info");
   void preflightProxy();
 }
 
@@ -224,7 +225,7 @@ function resolvePiUndici(): { undici?: any; error?: string } {
       // пробуем следующую базу
     }
   }
-  return { error: `не удалось найти undici пи (базы: ${candidates.join(", ") || "нет"})` };
+  return { error: t("proxyUndiciNotFound", { bases: candidates.join(", ") || "нет" }) };
 }
 
 /** Идемпотентная установка обёртки; безопасно вызывать перед каждым запросом. */
@@ -253,28 +254,28 @@ function ensureTransportInstalled(): void {
             status: info.status,
           });
           proxyState.notify?.(
-            `NIM ${info.status}: ключ ${maskKey(info.from)} исчерпан — переключаюсь на ключ ${maskKey(info.to)} (ротация пула)`,
+            t("rotationSwitch", { status: info.status, from: maskKey(info.from), to: maskKey(info.to) }),
             "info",
           );
         },
         onDeadKey: (key: string, status: number) => {
           debug("nvidia-rotation-dead", `ключ ${maskKey(key)} мёртв (${status})`, { ключ: maskKey(key), статус: status });
           proxyState.notify?.(
-            `NIM ${status}: ключ ${maskKey(key)} мёртв — исключён из ротации до конца сессии`,
+            t("rotationDeadKey", { status, key: maskKey(key) }),
             "warning",
           );
         },
         onExhausted: (info: { attempts: number; status: number }) => {
           debug("nvidia-rotation-exhausted", `${info.attempts} попыток — пул исчерпан`, info);
           proxyState.notify?.(
-            `NIM ${info.status}: два круга ротации (${info.attempts} попыток) не помогли — отдаю ошибку пи. Статус пула: /nvidia-plus-keys`,
+            t("rotationExhausted", { status: info.status, attempts: info.attempts }),
             "warning",
           );
         },
         onCooldownWait: (ms: number) => {
           const seconds = Math.max(1, Math.round(ms / 1000));
           debug("nvidia-rotation-wait", `все ключи в кулдауне, жду ${ms} мс`, {});
-          proxyState.notify?.(`NIM 429: все ключи пула в кулдауне — жду ${seconds} с (прерывается по Esc)`, "info");
+          proxyState.notify?.(t("rotationCooldownWait", { seconds }), "info");
         },
         log: (stage: string, label: string, payload: unknown) => debug(stage, label, payload),
       }
@@ -316,7 +317,9 @@ function ensureTransportInstalled(): void {
             notifiedDeadResponses.add(key);
             const dead = DEAD_MODELS[lastNvidiaModelId];
             proxyState.notify?.(
-              `NIM ${status}: ${lastNvidiaModelId}${dead ? ` — помечена мёртвой (${dead})` : " — модели с таким id нет в живом каталоге"}. Попробуйте другую модель.`,
+              dead
+                ? t("deadObservedMarked", { status, modelId: lastNvidiaModelId, reason: dead })
+                : t("deadObservedUnknown", { status, modelId: lastNvidiaModelId }),
               "warning",
             );
           }
@@ -346,7 +349,12 @@ function ensureTransportInstalled(): void {
               debug("nvidia-retry", `статус=${info.status}, повтор ${info.attempt}, задержка ${info.delayMs} мс`, info);
               const seconds = Math.max(1, Math.round(info.delayMs / 1000));
               proxyState.notify?.(
-                `NIM ${info.status}: повторяю прозрачно (попытка ${info.attempt + 1} из ${TRANSPORT_RETRY.maxRetries + 1}, через ${seconds} с)`,
+                t("retryScheduled", {
+                  status: info.status,
+                  attempt: info.attempt + 1,
+                  total: TRANSPORT_RETRY.maxRetries + 1,
+                  seconds,
+                }),
                 "info",
               );
             },
@@ -402,7 +410,7 @@ function initProxyFromEnv(): void {
   }
   ensureTransportInstalled(); // ставится и без прокси, если задан пул ключей (тикет 15)
   if (proxyState.installError) {
-    proxyState.notify?.(`pi-nvidia-plus: ${proxyState.installError} — прокси не включён`, "error");
+    proxyState.notify?.(t("proxyNotEnabled", { error: proxyState.installError }), "error");
   }
 }
 
@@ -412,7 +420,7 @@ function statusLine(ctx: ExtensionContext): string | undefined {
   if (!model || model.provider !== PROVIDER) return undefined;
   const level = ctx.thinkingLevel;
   const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
-  return `nv+ ${model.id} · thinking ${level ?? "?"}${plan ? ` → ${plan}` : " · no injection for this family"}`;
+  return `nv+ ${model.id} · thinking ${level ?? "?"}${plan ? ` → ${plan}` : t("statusNoInjection")}`;
 }
 
 export default function piNvidiaPlus(pi: ExtensionAPI): void {
@@ -452,20 +460,25 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       if (!ctx.hasUI) return;
       if (result.changed || factoryApplied) {
         ctx.ui.notify(
-          `pi-nvidia-plus: auto-applied ${result.summary.overrideIds.length} modelOverrides + ${result.summary.modelIds.length} models (ledger: nvidia-plus-models.json)`,
+          t("applyAutoApplied", { overrides: result.summary.overrideIds.length, models: result.summary.modelIds.length }),
           "info",
         );
       }
       factoryApplied = false;
       for (const conflict of result.conflicts) {
         ctx.ui.notify(
-          `pi-nvidia-plus: skipped ${conflict.providerId}/${conflict.modelId} (${conflict.kind}) — ${conflict.reason}; run "/nvidia-plus-apply force" to overwrite`,
+          t("applyConflictSkipped", {
+            providerId: conflict.providerId,
+            modelId: conflict.modelId,
+            kind: conflict.kind,
+            reason: conflict.reason,
+          }),
           "warning",
         );
       }
     } catch (e) {
       if (ctx.hasUI) {
-        ctx.ui.notify(`pi-nvidia-plus: auto-apply failed — ${e instanceof Error ? e.message : String(e)}`, "error");
+        ctx.ui.notify(t("applyAutoFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
       }
     }
   });
@@ -485,7 +498,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     const dead = DEAD_MODELS[event.model.id];
     if (dead) {
       ctx.ui.notify(
-        `⚠ ${event.model.id}: reported dead on NIM (${dead}). Requests will likely fail — you can still try, or pick another model.`,
+        t("deadOnSelect", { modelId: event.model.id, reason: dead }),
         "warning",
       );
       return;
@@ -494,7 +507,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     const report = loadDiscoveryReport();
     if (report?.missingKnown.includes(event.model.id)) {
       ctx.ui.notify(
-        `⚠ ${event.model.id}: отсутствовала в живом каталоге NIM при последнем обнаружении (${report.discoveredAt}). Запросы могут не пройти.`,
+        t("deadMissingKnown", { modelId: event.model.id, discoveredAt: report.discoveredAt }),
         "warning",
       );
     }
@@ -542,111 +555,133 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     if (status < 400) return;
     const modelId = ctx.model.id;
     const requestId = findRequestId(event.headers);
-    const ref = requestId ? ` · request ${requestId}` : "";
+    const ref = requestId ? t("respRef", { id: requestId }) : "";
     if (status === 429) {
       const retryAfter = event.headers?.["retry-after"];
       ctx.ui.notify(
-        `NIM 429 (rate limit) on ${modelId}${retryAfter ? ` · retry after ${retryAfter}` : " · no retry-after header"}${ref}`,
+        t("respRateLimit", {
+          modelId,
+          retryAfter: retryAfter ? t("respRateLimitRetryAfter", { value: retryAfter }) : t("respRateLimitNoHeader"),
+          ref,
+        }),
         "warning",
       );
     } else if (status === 404 || status === 410) {
       const dead = DEAD_MODELS[modelId];
       ctx.ui.notify(
-        `NIM ${status} on ${modelId}${dead ? ` — reported dead (${dead})` : ""} · retry or pick another model${ref}`,
+        t("respError", {
+          status,
+          modelId,
+          dead: dead ? t("respDeadNote", { reason: dead }) : "",
+          ref,
+        }),
         "warning",
       );
     } else {
-      ctx.ui.notify(`NIM ${status} on ${modelId}${ref}`, "warning");
+      ctx.ui.notify(t("respErrorPlain", { status, modelId, ref }), "warning");
     }
   });
 
   // ── (4) Метаданные — данными: применение/откат оверрайдов ────────────────
   pi.registerCommand("nvidia-plus-apply", {
-    description: "Apply pi-nvidia-plus overrides to models.json (own ids only; 'force' overwrites conflicting entries)",
+    description: t("cmdApplyDesc"),
     handler: async (args, ctx) => {
       try {
         const force = /\bforce\b/i.test(args ?? "");
         const result = applyFiles(force);
         for (const conflict of result.conflicts) {
           ctx.ui.notify(
-            `pi-nvidia-plus conflict: ${conflict.providerId}/${conflict.modelId} (${conflict.kind}) — ${conflict.reason}${force ? "; overwritten" : "; skipped, rerun with \"force\" to overwrite"}`,
+            t("applyConflictHead", {
+              providerId: conflict.providerId,
+              modelId: conflict.modelId,
+              kind: conflict.kind,
+              reason: conflict.reason,
+            }) + (force ? t("applyConflictOverwritten") : t("applyConflictPending")),
             "warning",
           );
         }
         if (result.changed) {
           await ctx.modelRegistry.refresh({ allowNetwork: false });
           ctx.ui.notify(
-            `pi-nvidia-plus: applied ${result.summary.overrideIds.length} modelOverrides + ${result.summary.modelIds.length} models to ${MODELS_JSON} (ledger: ${STATE_FILE}). Reopen /model to reload.`,
+            t("applyApplied", {
+              overrides: result.summary.overrideIds.length,
+              models: result.summary.modelIds.length,
+              path: MODELS_JSON,
+              ledger: STATE_FILE,
+            }),
             "info",
           );
           return;
         }
         ctx.ui.notify(
-          result.conflicts.length > 0
-            ? "pi-nvidia-plus: nothing applied — all pending entries conflict (use \"force\" to overwrite)."
-            : "pi-nvidia-plus: models.json already up to date.",
+          result.conflicts.length > 0 ? t("applyNothingConflicts") : t("applyUpToDate"),
           "info",
         );
       } catch (e) {
-        ctx.ui.notify(`pi-nvidia-plus: apply failed — ${e instanceof Error ? e.message : String(e)}`, "error");
+        ctx.ui.notify(t("applyFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
       }
     },
   });
 
   pi.registerCommand("nvidia-plus-rollback", {
-    description: "Remove pi-nvidia-plus entries from models.json (only entries matching the ledger)",
+    description: t("cmdRollbackDesc"),
     handler: async (_args, ctx) => {
       try {
         const result = rollbackFiles();
         if (!result.hadState) {
-          ctx.ui.notify("pi-nvidia-plus: nothing to roll back (no ledger file).", "info");
+          ctx.ui.notify(t("rollbackNothing"), "info");
           return;
         }
         for (const k of result.kept) {
           ctx.ui.notify(
-            `pi-nvidia-plus: kept ${k.providerId}/${k.modelId} (${k.kind}) — edited since last apply; remove it manually if needed`,
+            t("rollbackKept", { providerId: k.providerId, modelId: k.modelId, kind: k.kind }),
             "warning",
           );
         }
         if (result.changed) {
           await ctx.modelRegistry.refresh({ allowNetwork: false });
           ctx.ui.notify(
-            `pi-nvidia-plus: removed ${result.removed.length} entries from models.json; auto-apply disabled until next apply. Reopen /model to reload.`,
+            t("rollbackRemoved", { count: result.removed.length }),
             "info",
           );
           return;
         }
-        ctx.ui.notify("pi-nvidia-plus: models.json already clean; auto-apply disabled.", "info");
+        ctx.ui.notify(t("rollbackClean"), "info");
       } catch (e) {
-        ctx.ui.notify(`pi-nvidia-plus: rollback failed — ${e instanceof Error ? e.message : String(e)}`, "error");
+        ctx.ui.notify(t("rollbackFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
       }
     },
   });
 
   // ── Диагностика: что видит хук ────────────────────────────────────────────
   pi.registerCommand("nvidia-plus-status", {
-    description: "nvidia: current model, thinking level and what the hook injects",
+    description: t("cmdStatusDesc"),
     handler: async (_args, ctx) => {
-      const auto = loadState()?.enabled === false ? "auto-apply disabled" : "auto-apply on";
+      const auto = loadState()?.enabled === false ? t("statusAutoOff") : t("statusAutoOn");
       const proxy = proxyState.configured
         ? proxyState.installError
-          ? `proxy ${proxyState.url?.toString() ?? "?"}: не включён (${proxyState.installError})`
+          ? t("statusProxyInstallError", { url: proxyState.url?.toString() ?? "?", error: proxyState.installError })
           : proxyState.preflightError
-            ? `proxy ${proxyState.url?.toString() ?? "?"}: установлен, но ${proxyState.preflightError}`
-            : `proxy ${proxyState.url?.toString() ?? "?"}${proxyState.installed ? " (установлен)" : ""}`
-        : "proxy: не настроен (NVIDIA_NIM_PROXY)";
+            ? t("statusProxyPreflightError", { url: proxyState.url?.toString() ?? "?", error: proxyState.preflightError })
+            : proxyState.installed
+              ? t("statusProxyInstalled", { url: proxyState.url?.toString() ?? "?" })
+              : t("statusProxyPlain", { url: proxyState.url?.toString() ?? "?" })
+        : t("statusProxyNotConfigured");
       const retryState = proxyState.configured || keyPool.hasSource()
         ? transportRetryEnabled()
-          ? `прозрачный повтор 429/5xx: вкл (до ${TRANSPORT_RETRY.maxRetries} повторов)`
-          : "прозрачный повтор 429/5xx: выкл (NVIDIA_NIM_TRANSPORT_RETRY)"
+          ? t("statusRetryOn", { count: TRANSPORT_RETRY.maxRetries })
+          : t("statusRetryOff")
         : undefined;
       const rotationState = keyPool.hasSource()
-        ? `ротация ключей: ${keyRotationState.enabled ? "вкл" : "выкл"} (пул ${keyPool.describe()}, ${keyPool.refresh().length} + ключ пи)`
-        : "ротация ключей: пул не задан";
+        ? t(keyRotationState.enabled ? "statusRotationOn" : "statusRotationOff", {
+            source: keyPool.describe(),
+            count: keyPool.refresh().length,
+          })
+        : t("statusRotationNoPool");
       const model = ctx.model;
       if (!model || model.provider !== PROVIDER) {
         ctx.ui.notify(
-          `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): current model is not nvidia (${model ? `${model.provider}/${model.id}` : "none"})`,
+          `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): ${t("statusNotNvidia", { model: model ? `${model.provider}/${model.id}` : "none" })}`,
           "info",
         );
         return;
@@ -654,7 +689,11 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const level = ctx.thinkingLevel;
       const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
       ctx.ui.notify(
-        `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): ${model.id} · thinking ${level ?? "?"}${plan ? ` → injects ${plan}` : " · no injection for this family"}`,
+        `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): ${t("statusThinking", {
+          modelId: model.id,
+          level: level ?? "?",
+          plan: plan ? t("statusInjectsPlan", { plan }) : t("statusNoInjection"),
+        })}`,
         "info",
       );
     },
@@ -662,13 +701,13 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
 
   // ── Пул ключей NIM (тикет 15) ───────────────────────────────────────
   pi.registerCommand("nvidia-plus-keys", {
-    description: "NIM key pool status; 'off'/'on' переключает ротацию в живой сессии",
+    description: t("cmdKeysDesc"),
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim().toLowerCase();
       if (arg === "off" || arg === "on") {
         keyRotationState.enabled = arg === "on";
         ctx.ui.notify(
-          `пи-нвидиа-плюс: ротация ключей ${arg === "on" ? "включена" : "выключена"} (среда: NVIDIA_NIM_KEY_ROTATION)`,
+          t("rotationToggled", { state: arg === "on" ? t("rotationToggledOn") : t("rotationToggledOff") }),
           "info",
         );
         return;
@@ -676,7 +715,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const poolKeys = keyPool.refresh();
       if (!keyPool.hasSource() && poolKeys.length === 0) {
         ctx.ui.notify(
-          `пи-нвидиа-плюс: пул ключей не задан — создайте ~/.pi/agent/${DEFAULT_KEYS_FILE_NAME} ({"keys": ["nvapi-…", …]}) или задайте NVIDIA_NIM_KEYS[_FILE]; ротация не активна`,
+          t("keysPoolNotSet", { file: DEFAULT_KEYS_FILE_NAME }),
           "info",
         );
         return;
@@ -685,24 +724,30 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const ring = [...(piKey ? [piKey] : []), ...poolKeys.filter((k) => k !== piKey)];
       const now = Date.now();
       const rows = keyRotator.statusFor(ring, now).map((row, index) => {
-        const piMark = index === 0 && piKey ? " (ключ пи)" : "";
+        const piMark = index === 0 && piKey ? t("keysPiKeyMark") : "";
         const state =
           row.state === "dead"
-            ? "мёртв (401/403)"
+            ? t("keysStateDead")
             : row.state === "cooldown"
-              ? `кулдаун ещё ${Math.max(1, Math.round(row.cooldownLeftMs / 1000))} с`
+              ? t("keysStateCooldown", { seconds: Math.max(1, Math.round(row.cooldownLeftMs / 1000)) })
               : row.active
-                ? "активен"
-                : "готов";
+                ? t("keysStateActive")
+                : t("keysStateReady");
         return `${row.masked}${piMark} — ${state}`;
       });
-      const rotation = keyRotationState.enabled ? "вкл" : "выкл (включить: /nvidia-plus-keys on)";
+      const rotation = keyRotationState.enabled ? t("rotationStateOn") : t("rotationStateOff");
       const installedHint =
         !keyRotationState.installedWithRotation && proxyState.installed
-          ? "; обёртка установлена без ротации — /reload или перезапуск подхватит пул"
+          ? t("keysInstalledWithoutRotation")
           : "";
       ctx.ui.notify(
-        `пи-нвидиа-плюс: ротация ${rotation}; пул ${keyPool.describe()} (${poolKeys.length} + ключ пи); ${rows.join("; ")}. Каждый процесс пи ротирует независимо${installedHint}`,
+        t("keysStatusSummary", {
+          state: rotation,
+          source: keyPool.describe(),
+          count: poolKeys.length,
+          rows: rows.join("; "),
+          hint: installedHint,
+        }),
         "info",
       );
     },
@@ -712,7 +757,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   // Триггер — команда, а не старт сессии: обнаружение опционально и не должно
   // добавлять сетевую зависимость к каждой загрузке пи.
   pi.registerCommand("nvidia-plus-discover", {
-    description: "Live NIM discovery: GET /v1/models, add new chat models, mark missing known models",
+    description: t("cmdDiscoverDesc"),
     handler: async (_args, ctx) => {
       try {
         ensureTransportInstalled();
@@ -724,12 +769,12 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
           signal: AbortSignal.timeout(20_000),
         });
         if (!res.ok) {
-          ctx.ui.notify(`pi-nvidia-plus: NIM /v1/models вернул HTTP ${res.status}`, "error");
+          ctx.ui.notify(t("discoverHttpError", { status: res.status }), "error");
           return;
         }
         const live = parseModelsResponse(await res.json());
         if (live.length === 0) {
-          ctx.ui.notify("pi-nvidia-plus: не удалось разобрать ответ NIM /v1/models", "error");
+          ctx.ui.notify(t("discoverParseError"), "error");
           return;
         }
         const baseIds = ctx.modelRegistry
@@ -754,16 +799,27 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
           if (result.changed) await ctx.modelRegistry.refresh({ allowNetwork: false });
           for (const conflict of result.conflicts) {
             ctx.ui.notify(
-              `pi-nvidia-plus: ${conflict.providerId}/${conflict.modelId} (${conflict.kind}) — ${conflict.reason}`,
+              t("discoverConflict", {
+                providerId: conflict.providerId,
+                modelId: conflict.modelId,
+                kind: conflict.kind,
+                reason: conflict.reason,
+              }),
               "warning",
             );
           }
         }
 
-        const added = summary.newChat.length > 0 ? `; добавлено новых: ${summary.newChat.join(", ")}` : "";
-        const missing = summary.missingKnown.length > 0 ? `; отсутствуют (подозрение на смерть): ${summary.missingKnown.join(", ")}` : "";
+        const added = summary.newChat.length > 0 ? t("discoverAdded", { ids: summary.newChat.join(", ") }) : "";
+        const missing = summary.missingKnown.length > 0 ? t("discoverMissing", { ids: summary.missingKnown.join(", ") }) : "";
         ctx.ui.notify(
-          `pi-nvidia-plus: обнаружение — живых ${summary.live} (чат ${summary.chat.length}, не-чат отсеяно ${summary.nonChat.length})${added}${missing}`,
+          t("discoverSummary", {
+            live: summary.live,
+            chat: summary.chat.length,
+            nonChat: summary.nonChat.length,
+            added,
+            missing,
+          }),
           "info",
         );
       } catch (e) {
@@ -773,7 +829,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             ? ` — ${describeProxyFailure(proxyState.url.toString(), cause)}`
             : "";
         ctx.ui.notify(
-          `pi-nvidia-plus: обнаружение не удалось${hint} (${e instanceof Error ? e.message : String(e)})`,
+          t("discoverFailed", { hint, error: e instanceof Error ? e.message : String(e) }),
           "error",
         );
       }

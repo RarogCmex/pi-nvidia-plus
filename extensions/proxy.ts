@@ -12,6 +12,7 @@
  * Референс: `.scratch/pi-nvidia-plus/issues/04-proxy-mechanics.md` (вариант A).
  */
 import { KeyRotator, maskKey, type RotationRequest } from "./keys.ts";
+import { t } from "./i18n.ts";
 
 export const NVIDIA_ORIGIN = "https://integrate.api.nvidia.com";
 
@@ -28,7 +29,7 @@ export function parseProxyUrl(raw: string | undefined): ParsedProxy {
   try {
     return { url: new URL(candidate) };
   } catch {
-    return { error: `не удалось разобрать NVIDIA_NIM_PROXY: ${value}` };
+    return { error: t("proxyParseError", { value }) };
   }
 }
 
@@ -108,10 +109,10 @@ export function extractDiagnostics(status: number, headers: Record<string, strin
 }
 
 export function formatDiagnostic(d: NimDiagnostic): string {
-  const retry = d.retryAfterMs !== undefined ? `, повтор через ${Math.max(1, Math.round(d.retryAfterMs / 1000))} с` : "";
-  const id = d.requestId ? `, запрос ${d.requestId}` : "";
-  if (d.status === 429) return `NIM 429: ограничение частоты${retry}${id}`;
-  return `NIM ${d.status}: ошибка сервера${retry}${id}`;
+  const retry = d.retryAfterMs !== undefined ? t("diagRetryIn", { seconds: Math.max(1, Math.round(d.retryAfterMs / 1000)) }) : "";
+  const request = d.requestId ? t("diagRequestId", { id: d.requestId }) : "";
+  if (d.status === 429) return t("diagRateLimit", { retry, request });
+  return t("diagServerError", { status: d.status, retry, request });
 }
 
 const PROXY_CONNECT_CODES = new Set([
@@ -135,7 +136,7 @@ export function isProxyConnectError(err: unknown): boolean {
 export function describeProxyFailure(proxyUrl: string, cause: unknown): string {
   const code = (cause as NodeJS.ErrnoException | undefined)?.code;
   const detail = code ?? (cause instanceof Error ? cause.message : String(cause));
-  return `прокси NIM ${proxyUrl} недоступен (${detail}) — проверьте переменную NVIDIA_NIM_PROXY`;
+  return t("proxyUnreachable", { url: proxyUrl, detail });
 }
 
 export interface DispatchTarget {

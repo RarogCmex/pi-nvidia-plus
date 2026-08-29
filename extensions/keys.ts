@@ -15,6 +15,7 @@
  * попадают в отчёты целиком — только маскированные суффиксы (`maskKey`).
  */
 import { readFileSync, statSync } from "node:fs";
+import { t } from "./i18n.ts";
 
 export const DEFAULT_KEYS_FILE_NAME = "nvidia-keys.json";
 
@@ -91,18 +92,18 @@ export function parseKeysFileContent(raw: string): KeysFileContent {
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    return { error: `файл ключей — не JSON: ${e instanceof Error ? e.message : String(e)}` };
+    return { error: t("keysFileNotJson", { error: e instanceof Error ? e.message : String(e) }) };
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { error: 'файл ключей: ожидается объект {"keys": [...]}' };
+    return { error: t("keysFileShape") };
   }
   const keys = (parsed as Record<string, unknown>).keys;
-  if (!Array.isArray(keys)) return { error: 'файл ключей: нет массива "keys"' };
+  if (!Array.isArray(keys)) return { error: t("keysFileNoArray") };
   const out: string[] = [];
   for (const entry of keys) {
-    if (typeof entry !== "string") return { error: "файл ключей: в \"keys\" только строки" };
+    if (typeof entry !== "string") return { error: t("keysFileNotStrings") };
     const trimmed = entry.trim();
-    if (!trimmed) return { error: "файл ключей: пустая строка в \"keys\"" };
+    if (!trimmed) return { error: t("keysFileEmptyString") };
     out.push(trimmed);
   }
   return { keys: out };
@@ -198,7 +199,7 @@ export class KeyPool {
     } catch {
       // Файл пропал: держим старый пул, предупреждаем один раз.
       if (this.loaded && this.loadedFrom === path) {
-        this.warnOnce("vanished", `файл ключей ${path} пропал — использую прежний пул (${this.loaded.keys.length} кл.)`);
+        this.warnOnce("vanished", t("keysFileVanished", { path, count: this.loaded.keys.length }));
         return this.loaded.keys;
       }
       return [];
@@ -211,7 +212,7 @@ export class KeyPool {
     if (mode !== undefined && (mode & 0o777) !== 0o600 && process.platform !== "win32") {
       if (!this.warnedPerms) {
         this.warnedPerms = true;
-        this.opts.onWarn?.(`файл ключей ${path} имеет права ${(mode & 0o777).toString(8)} — рекомендуется 600 (ключи читаются, но лучше ограничить)`);
+        this.opts.onWarn?.(`pi-nvidia-plus: ${t("keysFilePerms", { path, mode: (mode & 0o777).toString(8) })}`);
       }
     }
 
@@ -219,12 +220,12 @@ export class KeyPool {
     try {
       raw = readFileSync(path, "utf8");
     } catch (e) {
-      this.keepOldPool(path, `файл ключей ${path} не читается (${e instanceof Error ? e.message : String(e)})`);
+      this.keepOldPool(path, t("keysFileUnreadable", { path, error: e instanceof Error ? e.message : String(e) }));
       return this.loaded?.keys ?? [];
     }
     const parsed = parseKeysFileContent(raw);
     if (!parsed.keys) {
-      this.keepOldPool(path, `файл ключей ${path}: ${parsed.error}`);
+      this.keepOldPool(path, t("keysFileParse", { path, error: parsed.error ?? "?" }));
       return this.loaded?.keys ?? [];
     }
     const keys = this.resolveKeys(parsed.keys, path);
@@ -243,7 +244,7 @@ export class KeyPool {
     for (const key of keys) {
       const resolved = interpolateEnvValue(key, this.opts.env);
       if (resolved === undefined || !resolved.trim()) {
-        this.warnOnce(`unresolved:${key}`, `ключ из ${source} не разрешился (нет переменной в ${key}) — пропущен`);
+        this.warnOnce(`unresolved:${key}`, t("keysUnresolved", { source, key }));
         continue;
       }
       out.push(resolved.trim());
@@ -259,7 +260,7 @@ export class KeyPool {
       if (this.warnedUnresolved.has(id)) return;
       this.warnedUnresolved.add(id);
     }
-    this.opts.onWarn?.(`пи-нвидиа-плюс: ${message}`);
+    this.opts.onWarn?.(`pi-nvidia-plus: ${message}`);
   }
 }
 
