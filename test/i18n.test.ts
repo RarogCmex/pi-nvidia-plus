@@ -11,14 +11,15 @@ import {
 import { formatDiagnostic, parseProxyUrl, describeProxyFailure } from "../extensions/proxy.ts";
 import { parseKeysFileContent } from "../extensions/keys.ts";
 
-// 1. detectLocale: явная переменная имеет приоритет.
+// 1. detectLocale: явная переменная имеет приоритет и решает сама; не-`ru` — английский.
 {
   assert.equal(detectLocale({ PI_NVIDIA_PLUS_LANG: "ru" }), "ru");
   assert.equal(detectLocale({ PI_NVIDIA_PLUS_LANG: "RU" }), "ru");
+  assert.equal(detectLocale({ PI_NVIDIA_PLUS_LANG: "ru_RU.UTF-8" }), "ru", "префикс `ru` в явной переменной");
   assert.equal(detectLocale({ PI_NVIDIA_PLUS_LANG: "en", LANG: "ru_RU.UTF-8" }), "en");
   assert.equal(detectLocale({ PI_NVIDIA_PLUS_LANG: "ru", LANG: "en_US.UTF-8" }), "ru");
-  // Нераспознанное явное значение — проваливаемся к окружению.
-  assert.equal(detectLocale({ PI_NVIDIA_PLUS_LANG: "fr", LANG: "ru_RU.UTF-8" }), "ru");
+  // Явное не-`ru` не проваливается к окружению.
+  assert.equal(detectLocale({ PI_NVIDIA_PLUS_LANG: "fr", LANG: "ru_RU.UTF-8" }), "en");
 }
 
 // 2. detectLocale: LC_ALL > LC_MESSAGES > LANG; C/POSIX пропускаются; дефолт en.

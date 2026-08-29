@@ -2,10 +2,10 @@
  * i18n-слой расширения (тикет 17): все пользовательские тексты в двух
  * языках — английском (по умолчанию) и русском.
  *
- * Локаль выбирается из окружения: `PI_NVIDIA_PLUS_LANG` (`en`/`ru`) имеет
- * приоритет; дальше первый заданный из `LC_ALL` / `LC_MESSAGES` / `LANG`
- * (`C`/`POSIX` считаются незаданными); значение, не начинающееся на `ru`,
- * даёт английский.
+ * Локаль выбирается из окружения: `PI_NVIDIA_PLUS_LANG` имеет приоритет и,
+ * если задан, решает сам; дальше первый заданный из `LC_ALL` / `LC_MESSAGES`
+ * / `LANG` (`C`/`POSIX` считаются незаданными); значение, не начинающееся на
+ * `ru`, даёт английский.
  *
  * Модуль — листовой шов без зависимостей: `setLocale` для тестов и живой
  * смены, `tIn` для явной локали. Подстановки `{name}`; наборы подстановок
@@ -52,6 +52,10 @@ export const MESSAGES = {
   proxyUndiciNotFound: {
     en: "could not locate pi's undici (bases: {bases})",
     ru: "не удалось найти undici пи (базы: {bases})",
+  },
+  basesNone: {
+    en: "none",
+    ru: "нет",
   },
   proxyParseError: {
     en: "could not parse NVIDIA_NIM_PROXY: {value}",
@@ -424,9 +428,10 @@ export function setLocale(locale: Locale | undefined): void {
  * не-`ru` — английский.
  */
 export function detectLocale(env: Record<string, string | undefined> = process.env): Locale {
-  const explicit = env.PI_NVIDIA_PLUS_LANG?.trim().toLowerCase();
-  if (explicit === "ru") return "ru";
-  if (explicit === "en") return "en";
+  const explicit = env.PI_NVIDIA_PLUS_LANG?.trim();
+  // Явная переменная решает сама (тикет 17: «всё, что не начинается на `ru`,
+  // — английский»): провал в окружение был бы молчаливым нарушением приоритета.
+  if (explicit) return explicit.toLowerCase().startsWith("ru") ? "ru" : "en";
   for (const name of ["LC_ALL", "LC_MESSAGES", "LANG"]) {
     const value = env[name]?.trim();
     if (!value || value === "C" || value.toUpperCase() === "POSIX") continue;

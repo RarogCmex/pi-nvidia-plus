@@ -242,7 +242,8 @@ function makeTarget(name: string) {
   conn.code = "ECONNREFUSED";
   handler.onResponseError(null, conn);
   assert.equal(errors.length, 1);
-  assert.ok(errors[0].message.includes("прокси"), errors[0].message);
+  // Локаль-независимый идентификатор: текст сообщения локализован (тикет 17).
+  assert.ok(errors[0].message.includes("NVIDIA_NIM_PROXY"), errors[0].message);
   assert.ok(errors[0].message.includes("192.168.88.248:8870"), errors[0].message);
   assert.equal((errors[0] as NodeJS.ErrnoException).code, "ECONNREFUSED", "код потерян");
   assert.strictEqual(errors[0].cause, conn, "причина потеряна");
@@ -262,7 +263,7 @@ function makeTarget(name: string) {
   const conn = new Error("connect ECONNREFUSED") as NodeJS.ErrnoException;
   conn.code = "ECONNREFUSED";
   legacy.onError(conn);
-  assert.ok(errors[0] instanceof Error && (errors[0] as Error).message.includes("прокси"));
+  assert.ok(errors[0] instanceof Error && (errors[0] as Error).message.includes("NVIDIA_NIM_PROXY"));
 
   const abort = new Error("Request aborted");
   abort.name = "AbortError";
@@ -284,7 +285,7 @@ function makeTarget(name: string) {
   conn.code = "ECONNREFUSED";
   handler.onResponseError(null, conn);
   assert.equal(proxyErrors.length, 1);
-  assert.ok(proxyErrors[0].includes("прокси") && proxyErrors[0].includes("ECONNREFUSED"), proxyErrors[0]);
+  assert.ok(proxyErrors[0].includes("NVIDIA_NIM_PROXY") && proxyErrors[0].includes("ECONNREFUSED"), proxyErrors[0]);
 }
 // 10. Идемпотентная установка: маркер, повтор не ставит вторую обёртку
 {

@@ -128,6 +128,7 @@ function findRequestId(headers: Record<string, string> | undefined): string | un
 // ── Прокси: состояние и установка (тикеты 10/11) ─────────────────────────────
 // Нужен экземпляр undici самого пи: у расширения свой node_modules, и его undici
 // на глобальный диспетчер пи не влияет. Ищем от входа пи (process.argv[1]).
+type Notifier = (message: string, type?: "info" | "warning" | "error") => void;
 interface ProxyState {
   configured: boolean;
   url?: URL;
@@ -135,7 +136,7 @@ interface ProxyState {
   installed: boolean;
   preflightDone: boolean;
   preflightError?: string;
-  notify?: (message: string, type?: "info" | "warning" | "error") => void;
+  notify?: Notifier;
 }
 
 const proxyState: ProxyState = { configured: false, installed: false, preflightDone: false };
@@ -177,7 +178,7 @@ const keyRotationState = {
 // Представление ротации — один раз и только при выбранной модели nvidia:
 // на старте сессии (если она уже стоит) или при выборе модели.
 let rotationIntroNotified = false;
-function notifyRotationIntro(ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }): void {
+function notifyRotationIntro(ui: { notify: Notifier }): void {
   if (rotationIntroNotified || !keyPool.hasSource()) return;
   rotationIntroNotified = true;
   const poolSize = keyPool.refresh().length;
@@ -192,7 +193,7 @@ function notifyRotationIntro(ui: { notify: (message: string, type?: "info" | "wa
 // на старте сессии (если она уже стоит) или при выборе модели. На не-`nvidia`
 // сессиях расширение не должно проявляться (критерий приёмки №5).
 let proxyIntroNotified = false;
-function notifyProxyIntro(ui: { notify: (message: string, type?: "info" | "warning" | "error") => void }): void {
+function notifyProxyIntro(ui: { notify: Notifier }): void {
   if (proxyIntroNotified || !proxyState.configured || !proxyState.url) return;
   proxyIntroNotified = true;
   if (proxyState.installError) {
@@ -225,7 +226,7 @@ function resolvePiUndici(): { undici?: any; error?: string } {
       // пробуем следующую базу
     }
   }
-  return { error: t("proxyUndiciNotFound", { bases: candidates.join(", ") || "нет" }) };
+  return { error: t("proxyUndiciNotFound", { bases: candidates.join(", ") || t("basesNone") }) };
 }
 
 /** Идемпотентная установка обёртки; безопасно вызывать перед каждым запросом. */
@@ -443,7 +444,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    if (ctx.hasUI) proxyState.notify = (m, t) => ctx.ui.notify(m, t);
+    if (ctx.hasUI) proxyState.notify = (message, type) => ctx.ui.notify(message, type);
     // Пи мог пересоздать глобальный диспетчер до загрузки расширения.
     ensureTransportInstalled();
     // Прокси и ротация представляются только при выбранной модели nvidia (тикет 16).
