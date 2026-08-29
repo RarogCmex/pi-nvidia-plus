@@ -447,6 +447,24 @@ export interface RotationLayerOptions {
   log?: (stage: string, label: string, payload: unknown) => void;
 }
 
+/**
+ * Модель из тела запроса (тикет 22): fetch кладёт строку, иные формы тела
+ * (итераторы) на этом этапе не распарсиваем — тогда кулдаун ведётся по
+ * глобальному бакету ключа, как до тикета 22.
+ */
+function extractModelFromBody(body: unknown): string | undefined {
+  let text: string | undefined;
+  if (typeof body === "string") text = body;
+  else if (body instanceof Uint8Array) text = new TextDecoder().decode(body);
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text) as { model?: unknown };
+    return typeof parsed.model === "string" ? parsed.model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function runRotationLoop(
   target: DispatchTarget,
   opts: Record<string, unknown>,
@@ -512,10 +530,14 @@ async function runRotationLoop(
         headers: withAuthorization(opts.headers, key),
         body,
       };
+      options.rotator.noteInFlight(key); // тикет 25: занятость для выбора соседних запросов
       const outcome = await dispatchRotationAttempt(target, attemptOpts, controller, real);
+      options.rotator.releaseInFlight(key);
       if (controller.aborted) return;
       if (outcome.type === "delivered") {
-        options.rotator.markDelivered(key);
+        // Тикет 25: доставка гасит кулдаун только своей модели — чужие модельные
+        // бакеты ключа, поставленные параллельными сабагентами, не трогаем.
+        options.rotator.markDelivered(key, request.model);
         options.log?.("rotation-delivered", `ответ ушёл в пи, ключ ${maskKey(key)}`, {});
         return;
       }
@@ -532,7 +554,7 @@ async function runRotationLoop(
         continue;
       }
       const cooldownMs = resolveCooldownMs(outcome.response.headers, options, now());
-      options.rotator.markRateLimited(key, cooldownMs, now());
+      options.rotator.markRateLimited(key, cooldownMs, now(), request.model);
       options.log?.("rotation-cooldown", `ключ ${maskKey(key)} в кулдауне ${cooldownMs} мс`, {});
     }
   } finally {
@@ -556,7 +578,8 @@ export function withKeyRotation(target: DispatchTarget, options: RotationLayerOp
         } else {
           const requestKey = extractBearerKey((opts as { headers?: unknown } | null)?.headers);
           options.rotator.setPool(options.getPoolKeys());
-          request = options.rotator.beginRequest(requestKey, (options.now ?? Date.now)());
+          const model = extractModelFromBody((opts as { body?: unknown } | null)?.body);
+          request = options.rotator.beginRequest(requestKey, (options.now ?? Date.now)(), model);
           if (!request.isUseful()) passthrough = true;
         }
       } catch {

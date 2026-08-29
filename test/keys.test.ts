@@ -394,4 +394,114 @@ function keys(pick: RotationPick): string | undefined {
   assert.deepEqual(seen, ["nvapi-b", "nvapi-c", "nvapi-b", "nvapi-c"], "два круга по живым, без лишних попыток");
 }
 
+// ── Тикет 22: кулдаун по паре (ключ, модель) ─────────────────────────────────
+
+// 22.1. Кулдаун на модели A не блокирует ту же модель B/другую модель того же ключа.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b"]);
+  const MODEL_A = "moonshotai/kimi-k3";
+  const MODEL_B = "minimaxai/minimax-m3";
+  r.markRateLimited("nvapi-pi", 60_000, 0, MODEL_A);
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000, MODEL_A), 59_000, "кулдаун на своей модели");
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000, MODEL_B), 0, "другая модель готова");
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000), 0, "запрос без модели тоже готов");
+}
+
+// 22.2. Глобальный кулдаун (без модели) действует на все модели.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b"]);
+  r.markRateLimited("nvapi-pi", 60_000, 0);
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000, "moonshotai/kimi-k3"), 59_000, "глобальный бакет блокирует любую модель");
+}
+
+// 22.3. Выбор ключа учитывает модель запроса: кулдаун на своей модели → следующий ключ.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b", "nvapi-c"]);
+  r.markRateLimited("nvapi-pi", 60_000, 0, "moonshotai/kimi-k3");
+  const reqA = r.beginRequest("nvapi-pi", 0, "moonshotai/kimi-k3");
+  assert.equal(keys(reqA.pick(0)), "nvapi-b", "на киме ключ пи в кулдауне → следующий");
+  const reqB = r.beginRequest("nvapi-pi", 0, "minimaxai/minimax-m3");
+  assert.equal(keys(reqB.pick(0)), "nvapi-pi", "на m3 ключ пи готов");
+}
+
+// 22.4. Мёртвый ключ (401/403) мёртв для всех моделей; его кулдауны снимаются.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b"]);
+  r.markRateLimited("nvapi-pi", 60_000, 0, "moonshotai/kimi-k3");
+  r.markDead("nvapi-pi");
+  assert.ok(r.isDead("nvapi-pi"));
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000, "moonshotai/kimi-k3"), 0, "кулдаун мёртвого снят");
+  const req = r.beginRequest("nvapi-pi", 0, "moonshotai/kimi-k3");
+  assert.equal(keys(req.pick(0)), "nvapi-b", "мёртвый пропускается и на своей модели");
+}
+
+// 22.5/25.  Доставленный ответ очищает глобальный бакет и бакет своей модели,
+// но не чужие модельные бакеты (тикет 25: параллельные сабагенты).
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b"]);
+  r.markRateLimited("nvapi-pi", 60_000, 0, "moonshotai/kimi-k3");
+  r.markRateLimited("nvapi-pi", 60_000, 0);
+  r.markRateLimited("nvapi-pi", 60_000, 0, "z-ai/glm-5");
+  r.markDelivered("nvapi-pi", "moonshotai/kimi-k3");
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000, "moonshotai/kimi-k3"), 0, "своя модель очищена");
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000), 0, "глобальный очищен");
+  assert.equal(r.cooldownLeft("nvapi-pi", 1_000, "z-ai/glm-5"), 59_000, "чужая модель не тронута");
+}
+
+// ── Тикет 25: выбор с учётом занятости (in-flight) ──────────────────────────
+
+// 25.1. Параллельные запросы расходятся по разным ключам: занятый не берётся,
+// липкий при веере проигрывает свободному.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b", "nvapi-c"]);
+  r.markDelivered("nvapi-pi"); // липкий ключ пи
+  const req1 = r.beginRequest("nvapi-pi", 0);
+  const picked1 = keys(req1.pick(0));
+  assert.equal(picked1, "nvapi-pi", "первый запрос берёт липкий");
+  r.noteInFlight("nvapi-pi");
+  const req2 = r.beginRequest("nvapi-pi", 0);
+  assert.equal(keys(req2.pick(0)), "nvapi-b", "параллельный запрос уходит на свободный, не на липкий");
+}
+
+// 25.2. Ничья по занятости — липкий сохраняется (поведение последовательного диалога).
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b", "nvapi-c"]);
+  r.markDelivered("nvapi-pi");
+  r.noteInFlight("nvapi-pi");
+  r.noteInFlight("nvapi-b");
+  r.noteInFlight("nvapi-c"); // заняты все поровну — решает липкость
+  const req = r.beginRequest("nvapi-pi", 0);
+  assert.equal(keys(req.pick(0)), "nvapi-pi", "при равной занятости липкий выигрывает");
+}
+
+// 25.3. releaseInFlight возвращает ключ в свободные.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b"]);
+  r.noteInFlight("nvapi-pi");
+  assert.equal(r.inFlightCount("nvapi-pi"), 1);
+  r.releaseInFlight("nvapi-pi");
+  assert.equal(r.inFlightCount("nvapi-pi"), 0);
+  r.releaseInFlight("nvapi-pi"); // лишний релиз не уводит в минус
+  assert.equal(r.inFlightCount("nvapi-pi"), 0);
+}
+
 console.log("keys: все проверки прошли");
+
+// 22.6. statusFor с моделью показывает модельный бакет; без — как раньше.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.setPool(["nvapi-b"]);
+  r.markRateLimited("nvapi-pi", 60_000, 0, "moonshotai/kimi-k3");
+  assert.equal(r.statusFor(["nvapi-pi"], 1_000, "moonshotai/kimi-k3")[0].state, "cooldown");
+  assert.equal(r.statusFor(["nvapi-pi"], 1_000, "minimaxai/minimax-m3")[0].state, "ready");
+  assert.equal(r.statusFor(["nvapi-pi"], 1_000)[0].state, "ready", "без модели — готов");
+}
+

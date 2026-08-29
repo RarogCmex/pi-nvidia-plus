@@ -289,10 +289,13 @@ export class RotationRequest {
   private readonly attemptsByKey = new Map<string, number>();
   private readonly rotator: KeyRotator;
   private readonly ring: string[];
+  /** Модель запроса (тикет 22): кулдауны считаются по паре (ключ, модель). */
+  readonly model: string | undefined;
 
-  constructor(rotator: KeyRotator, ring: string[], _maxAttempts?: number) {
+  constructor(rotator: KeyRotator, ring: string[], model?: string) {
     this.rotator = rotator;
     this.ring = ring;
+    this.model = model;
   }
 
   /** Есть ли смысл вращаться: ≥2 живых ключа, либо ≥1 живой при мёртвом ключе пи. */
@@ -309,7 +312,8 @@ export class RotationRequest {
    * с попытками в кулдауне — ждать ближайший откат; попыток не осталось — исчерпание.
    */
   pick(now: number): RotationPick {
-    const ready = (k: string): boolean => !this.rotator.isDead(k) && this.rotator.cooldownLeft(k, now) === 0;
+    const ready = (k: string): boolean =>
+      !this.rotator.isDead(k) && this.rotator.cooldownLeft(k, now, this.model) === 0;
     const hasAttempts = (k: string): boolean => (this.attemptsByKey.get(k) ?? 0) < 2;
 
     const remaining = this.ring.filter((k) => !this.rotator.isDead(k) && hasAttempts(k));
@@ -318,23 +322,27 @@ export class RotationRequest {
     const readyKeys = remaining.filter(ready);
     const active = this.rotator.activeKey();
     let chosen: string | undefined;
-    if (active && readyKeys.includes(active)) {
-      chosen = active; // липкость
-    } else if (readyKeys.length > 0) {
-      chosen = readyKeys[0]; // круговой обход от начала кольца
+    if (readyKeys.length > 0) {
+      // Тикет 25: среди готовых — наименее занятый; липкий выигрывает только
+      // при ничьей (последовательный диалог: inFlight везде 0 — липкость
+      // неизменна; веер сабагентов расходится по разным ключам).
+      let minInFlight = Infinity;
+      for (const k of readyKeys) minInFlight = Math.min(minInFlight, this.rotator.inFlightCount(k));
+      const freest = readyKeys.filter((k) => this.rotator.inFlightCount(k) === minInFlight);
+      chosen = active && freest.includes(active) ? active : freest[0];
     }
     if (chosen !== undefined) {
       this.attemptsByKey.set(chosen, (this.attemptsByKey.get(chosen) ?? 0) + 1);
       return { kind: "key", key: chosen };
     }
 
-    const nearest = Math.min(...remaining.map((k) => this.rotator.cooldownLeft(k, now)));
+    const nearest = Math.min(...remaining.map((k) => this.rotator.cooldownLeft(k, now, this.model)));
     return { kind: "wait", ms: Math.max(0, nearest) };
   }
 
   /** Статус кольца этого запроса (только маскированные ключи). */
   report(now: number): RotationKeyStatus[] {
-    return this.rotator.statusFor(this.ring, now);
+    return this.rotator.statusFor(this.ring, now, this.model);
   }
 }
 
@@ -350,8 +358,15 @@ export interface KeyRotatorOptions {
  */
 export class KeyRotator {
   private pool: string[] = [];
+  // Кулдауны (тикет 22): бакет на пару (ключ, модель) — рейт-лимит NIM так
+  // устроен (тикет 21); глобальный бакет (просто ключ) остаётся для запросов
+  // без известной модели. Мёртвые (401/403) — по ключу целиком: это
+  // аккаунтный уровень, не модельный.
   private cooldownUntil = new Map<string, number>();
   private dead = new Set<string>();
+  // Занятость ключей параллельными запросами (тикет 25, pi-subagents):
+  // веер детей не должен валиться на один ключ лишь потому, что он липкий.
+  private inFlight = new Map<string, number>();
   private active: string | undefined;
   private readonly random: () => number;
 
@@ -372,13 +387,42 @@ export class KeyRotator {
     return this.dead.has(key);
   }
 
+  /** Попытка попросила ключ в работу (тикет 25). */
+  noteInFlight(key: string): void {
+    this.inFlight.set(key, (this.inFlight.get(key) ?? 0) + 1);
+  }
+
+  /** Попытка закончилась (доставка, статус, ошибка — без разницы). */
+  releaseInFlight(key: string): void {
+    const left = (this.inFlight.get(key) ?? 0) - 1;
+    if (left <= 0) this.inFlight.delete(key);
+    else this.inFlight.set(key, left);
+  }
+
+  /** Сколько запросов прямо сейчас работают с ключом. */
+  inFlightCount(key: string): number {
+    return this.inFlight.get(key) ?? 0;
+  }
+
   activeKey(): string | undefined {
     return this.active;
   }
 
-  /** Остаток кулдауна ключа в мс (0 — готов). */
-  cooldownLeft(key: string, now: number): number {
-    return Math.max(0, (this.cooldownUntil.get(key) ?? 0) - now);
+  /** Бакет кулдауна: `модель\nключ`, без модели — просто ключ. */
+  private bucket(key: string, model?: string): string {
+    return model ? `${model}\n${key}` : key;
+  }
+
+  /**
+   * Остаток кулдауна ключа в мс (0 — готов). Смотрит и модельный, и
+   * глобальный бакет: кулдаун без модели (тело не распарсилось) действует
+   * на все модели ключа, модельный — только на свою (тикет 22).
+   */
+  cooldownLeft(key: string, now: number, model?: string): number {
+    const left = Math.max(0, (this.cooldownUntil.get(key) ?? 0) - now);
+    if (!model) return left;
+    const scoped = Math.max(0, (this.cooldownUntil.get(this.bucket(key, model)) ?? 0) - now);
+    return Math.max(left, scoped);
   }
 
   /**
@@ -388,11 +432,11 @@ export class KeyRotator {
    * друг с другом за один и тот же первый живой ключ (меньше коллизий и 429).
    * Порядок внутри круга и липкость активного ключа не меняются.
    */
-  beginRequest(requestKey: string | undefined, _now: number): RotationRequest {
+  beginRequest(requestKey: string | undefined, _now: number, model?: string): RotationRequest {
     const ring: string[] = [];
     if (requestKey) ring.push(requestKey);
     for (const key of this.pool) if (!ring.includes(key)) ring.push(key);
-    return new RotationRequest(this, this.circularShift(ring, requestKey));
+    return new RotationRequest(this, this.circularShift(ring, requestKey), model);
   }
 
   /**
@@ -411,28 +455,40 @@ export class KeyRotator {
     return anchored ? [ring[0], ...rotated] : rotated;
   }
 
-  /** 429: ключ в кулдауне на время из `retry-after` (транспорт уже посчитал мс). */
-  markRateLimited(key: string, cooldownMs: number, now: number): void {
-    this.cooldownUntil.set(key, now + Math.max(0, cooldownMs));
+  /**
+   * 429: ключ в кулдауне на время из `retry-after` (транспорт уже посчитал мс).
+   * Если модель известна — кулдаун только на пару (ключ, модель), другие
+   * модели этого ключа остаются готовыми (тикет 22, анатомия — тикет 21).
+   */
+  markRateLimited(key: string, cooldownMs: number, now: number, model?: string): void {
+    this.cooldownUntil.set(this.bucket(key, model), now + Math.max(0, cooldownMs));
   }
 
-  /** 401/403: ключ мёртв до конца сессии. */
+  /** 401/403: ключ мёртв до конца сессии (для всех моделей — аккаунтный уровень). */
   markDead(key: string): void {
     this.dead.add(key);
-    this.cooldownUntil.delete(key);
+    for (const bucketName of [...this.cooldownUntil.keys()]) {
+      if (bucketName === key || bucketName.endsWith(`\n${key}`)) this.cooldownUntil.delete(bucketName);
+    }
   }
 
-  /** Ответ ушёл в пи: ключ становится липким активным. */
-  markDelivered(key: string): void {
+  /**
+   * Ответ ушёл в пи: ключ становится липким активным. Тикет 25: доставка
+   * доказывает работоспособность только на своей модели и «глобально» —
+   * чужие модельные бакеты ключа сохраняются (параллельный сабагент на
+   * другой модели не должен сбивать кулдаун этого ключа на kimi-k3).
+   */
+  markDelivered(key: string, model?: string): void {
     this.active = key;
     this.cooldownUntil.delete(key);
+    if (model) this.cooldownUntil.delete(this.bucket(key, model));
   }
 
   /** Статус заданных ключей (для команды); только маскированные ключи. */
-  statusFor(keys: string[], now: number): RotationKeyStatus[] {
+  statusFor(keys: string[], now: number, model?: string): RotationKeyStatus[] {
     return keys.map((key) => {
       const dead = this.dead.has(key);
-      const cooldownLeftMs = dead ? 0 : this.cooldownLeft(key, now);
+      const cooldownLeftMs = dead ? 0 : this.cooldownLeft(key, now, model);
       return {
         masked: maskKey(key),
         state: dead ? "dead" : cooldownLeftMs > 0 ? "cooldown" : "ready",

@@ -170,6 +170,9 @@ const notifiedDeadResponses = new Set<string>();
 // чтобы ретрай-цикл пи не заваливал пользователя одинаковыми предупреждениями.
 const lastDiagnosticNotify = new Map<string, number>();
 let lastNvidiaModelId: string | undefined;
+// Дроссель уведомлений о переключении ключей (тикет 25, pi-subagents).
+let lastSwitchNotifyAt = 0;
+let suppressedSwitchCount = 0;
 
 // Прозрачный транспортный повтор 429/5xx (тикет 14): короткие рейт-лимиты и
 // шлюзовые ошибки повторяются под наблюдателем, и пи с моделью их не видят.
@@ -230,6 +233,52 @@ function notifyProxyIntro(ui: { notify: Notifier }): void {
   void preflightProxy();
 }
 
+// ── Проверка пула ключей (тикет 23): `/nvidia-plus-keys check` ─────────────
+// Проба идёт напрямую (собственный ProxyAgent, вне установленных слоёв
+// ротации/повторов) — посторонние механики не должны маскировать результат
+// отдельного ключа. Прогрев по текущей выбранной nvidia-модели: пригодность
+// пула интересна именно для неё, «эталонной» модели у NIM нет.
+type KeyCheckOutcome = "ok" | "dead" | "limited" | "unknown";
+
+async function probeKeyOnce(undici: any, dispatcher: unknown, modelId: string, key: string): Promise<KeyCheckOutcome> {
+  try {
+    const res = await undici.request("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
+      dispatcher,
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "Reply with exactly: OK" }], max_tokens: 8 }),
+      headersTimeout: 20_000,
+      bodyTimeout: 20_000,
+    });
+    await res.body.text();
+    if (res.statusCode === 200) return "ok";
+    if (res.statusCode === 401 || res.statusCode === 403) return "dead";
+    if (res.statusCode === 429) return "limited";
+    debug("keys-check", `ключ ${maskKey(key)} — статус ${res.statusCode}`, {});
+    return "unknown";
+  } catch (e) {
+    debug("keys-check", `ключ ${maskKey(key)} — ${String(e).slice(0, 120)}`, {});
+    return "unknown";
+  }
+}
+
+/** Параллельность 4 — компромисс между скоростью прогрева и лимитами NIM. */
+async function checkKeyPool(modelId: string, keysToCheck: string[]): Promise<Map<string, KeyCheckOutcome>> {
+  const { undici, error } = resolvePiUndici();
+  if (!undici) throw new Error(error ?? "undici недоступен");
+  const dispatcher = proxyState.configured && proxyState.url ? new undici.ProxyAgent(proxyState.url.toString()) : undefined;
+  const results = new Map<string, KeyCheckOutcome>();
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < keysToCheck.length) {
+      const key = keysToCheck[cursor++];
+      results.set(key, await probeKeyOnce(undici, dispatcher, modelId, key));
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return results;
+}
+
 function resolvePiUndici(): { undici?: any; error?: string } {
   // argv[1] может быть симлинком (например, ~/.local/bin/pi) — createRequire
   // его не разворачивает, поэтому берём realpath.
@@ -281,8 +330,20 @@ function ensureTransportInstalled(): void {
             to: maskKey(info.to),
             status: info.status,
           });
+          // Тикет 25 (pi-subagents): веер детей не должен заваливать
+          // пользователя — не чаще одного уведомления в 5 с, подавленные
+          // переключения суммируются и доезжают в следующем видимом.
+          const nowMs = Date.now();
+          if (nowMs - lastSwitchNotifyAt < 5_000) {
+            suppressedSwitchCount++;
+            return;
+          }
+          const more = suppressedSwitchCount;
+          suppressedSwitchCount = 0;
+          lastSwitchNotifyAt = nowMs;
           proxyState.notify?.(
-            t("rotationSwitch", { status: info.status, from: maskKey(info.from), to: maskKey(info.to) }),
+            t("rotationSwitch", { status: info.status, from: maskKey(info.from), to: maskKey(info.to) }) +
+              (more > 0 ? t("rotationSwitchMore", { count: more }) : ""),
             "info",
           );
         },
@@ -613,10 +674,9 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     }
   });
 
+  // ── Обработчики подкоманд (тикет 24): регистрация одной командой ниже ──
   // ── (4) Метаданные — данными: применение/откат оверрайдов ────────────────
-  pi.registerCommand("nvidia-plus-apply", {
-    description: t("cmdApplyDesc"),
-    handler: async (args, ctx) => {
+  const cmdApply = async (args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
       try {
         const force = /\bforce\b/i.test(args ?? "");
         const result = applyFiles(force);
@@ -651,12 +711,9 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       } catch (e) {
         ctx.ui.notify(t("applyFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
       }
-    },
-  });
+  };
 
-  pi.registerCommand("nvidia-plus-rollback", {
-    description: t("cmdRollbackDesc"),
-    handler: async (_args, ctx) => {
+  const cmdRollback = async (_args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
       try {
         const result = rollbackFiles();
         if (!result.hadState) {
@@ -681,13 +738,10 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       } catch (e) {
         ctx.ui.notify(t("rollbackFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
       }
-    },
-  });
+  };
 
   // ── Диагностика: что видит хук ────────────────────────────────────────────
-  pi.registerCommand("nvidia-plus-status", {
-    description: t("cmdStatusDesc"),
-    handler: async (_args, ctx) => {
+  const cmdStatus = async (_args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
       const auto = loadState()?.enabled === false ? t("statusAutoOff") : t("statusAutoOn");
       // Тикет 18: при битом разборе configured сброшен — показываем ошибку,
       // а не «не настроен», чтобы опечатка в переменной не молчала.
@@ -732,14 +786,50 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         })}`,
         "info",
       );
-    },
-  });
+  };
 
-  // ── Пул ключей NIM (тикет 15) ───────────────────────────────────────
-  pi.registerCommand("nvidia-plus-keys", {
-    description: t("cmdKeysDesc"),
-    handler: async (args, ctx) => {
+  // ── Пул ключей NIM (тикеты 15/23) ───────────────────────────────────────
+  const cmdKeys = async (args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
       const arg = (args ?? "").trim().toLowerCase();
+      if (arg === "check") {
+        // Тикет 23: проверка пула по текущей выбранной nvidia-модели.
+        const model = ctx.model;
+        if (!model || model.provider !== PROVIDER) {
+          ctx.ui.notify(t("keysCheckNoModel"), "warning");
+          return;
+        }
+        const poolKeys = keyPool.refresh();
+        if (poolKeys.length === 0) {
+          ctx.ui.notify(t("keysPoolNotSet", { file: DEFAULT_KEYS_FILE_NAME }), "info");
+          return;
+        }
+        ctx.ui.notify(t("keysCheckStart", { count: poolKeys.length, modelId: model.id }), "info");
+        const startedAt = Date.now();
+        try {
+          const results = await checkKeyPool(model.id, poolKeys);
+          const groups: Record<KeyCheckOutcome, string[]> = { ok: [], dead: [], limited: [], unknown: [] };
+          for (const [key, outcome] of results) groups[outcome].push(key);
+          // Мёртвые сразу помечаем в ротаторе — сессия их больше не трогает.
+          for (const key of groups.dead) keyRotator.markDead(key);
+          const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+          const deadList = groups.dead.length > 0 ? t("keysCheckDeadList", { ids: groups.dead.map(maskKey).join(", ") }) : "";
+          ctx.ui.notify(
+            t("keysCheckSummary", {
+              modelId: model.id,
+              seconds,
+              ok: groups.ok.length,
+              dead: groups.dead.length,
+              limited: groups.limited.length,
+              unknown: groups.unknown.length,
+              deadList,
+            }),
+            groups.dead.length > 0 ? "warning" : "info",
+          );
+        } catch (e) {
+          ctx.ui.notify(t("keysCheckFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+        }
+        return;
+      }
       if (arg === "off" || arg === "on") {
         keyRotationState.enabled = arg === "on";
         ctx.ui.notify(
@@ -759,7 +849,9 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const piKey = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER).catch(() => undefined);
       const ring = [...(piKey ? [piKey] : []), ...poolKeys.filter((k) => k !== piKey)];
       const now = Date.now();
-      const rows = keyRotator.statusFor(ring, now).map((row, index) => {
+      // Кулдауны — на пару (ключ, модель): показываем состояние для текущей модели.
+      const displayModel = ctx.model?.provider === PROVIDER ? ctx.model.id : undefined;
+      const rows = keyRotator.statusFor(ring, now, displayModel).map((row, index) => {
         const piMark = index === 0 && piKey ? t("keysPiKeyMark") : "";
         const state =
           row.state === "dead"
@@ -786,15 +878,12 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         }),
         "info",
       );
-    },
-  });
+  };
 
   // ── Живое обнаружение моделей (тикет 12) ───────────────────────────────
   // Триггер — команда, а не старт сессии: обнаружение опционально и не должно
   // добавлять сетевую зависимость к каждой загрузке пи.
-  pi.registerCommand("nvidia-plus-discover", {
-    description: t("cmdDiscoverDesc"),
-    handler: async (_args, ctx) => {
+  const cmdDiscover = async (_args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
       try {
         ensureTransportInstalled();
         const headers: Record<string, string> = {};
@@ -869,6 +958,41 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
           "error",
         );
       }
+  };
+
+  // ── Одна команда с подкомандами (тикет 24): меню не загромождается ──
+  type CmdCtx = Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1];
+  const subcommands: Record<string, { description: string; run: (args: string | undefined, ctx: CmdCtx) => Promise<void> }> = {
+    apply: { description: t("cmdApplyDesc"), run: cmdApply },
+    rollback: { description: t("cmdRollbackDesc"), run: cmdRollback },
+    status: { description: t("cmdStatusDesc"), run: cmdStatus },
+    keys: { description: t("cmdKeysDesc"), run: cmdKeys },
+    discover: { description: t("cmdDiscoverDesc"), run: cmdDiscover },
+  };
+
+  pi.registerCommand("nvidia-plus", {
+    description: t("cmdRootDesc"),
+    getArgumentCompletions: (prefix: string) => {
+      const items = Object.entries(subcommands)
+        .map(([value, c]) => ({ value, label: `${value} — ${c.description}` }))
+        .filter((i) => i.value.startsWith(prefix));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
+      const trimmed = (args ?? "").trim();
+      const [sub, ...rest] = trimmed.split(/\s+/).filter(Boolean);
+      const command = sub ? subcommands[sub] : undefined;
+      if (!command) {
+        const list = Object.entries(subcommands)
+          .map(([name, c]) => `${name} — ${c.description}`)
+          .join("; ");
+        ctx.ui.notify(
+          t(sub ? "cmdUnknown" : "cmdUsage", { command: sub ?? "", list }),
+          "info",
+        );
+        return;
+      }
+      await command.run(rest.join(" "), ctx);
     },
   });
 }

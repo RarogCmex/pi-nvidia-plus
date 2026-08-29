@@ -50,6 +50,44 @@ export const MESSAGES = {
     ru: "pi-nvidia-plus: прокси не включён — {error}",
   },
 
+  keysCheckNoModel: {
+    en: "pi-nvidia-plus: key check needs a selected nvidia model — the pool is probed against it",
+    ru: "pi-nvidia-plus: проверке ключей нужна выбранная nvidia-модель — пул проверяется по ней",
+  },
+  keysCheckStart: {
+    en: "pi-nvidia-plus: probing {count} keys against {modelId} (one request each, no rotation/retries)…",
+    ru: "pi-nvidia-plus: проверяю {count} ключей на {modelId} (по одному запросу, без ротации и повторов)…",
+  },
+  keysCheckSummary: {
+    en: "pi-nvidia-plus: key check on {modelId} in {seconds} s — alive: {ok}, dead: {dead}, rate-limited: {limited}, unclear: {unknown}{deadList}",
+    ru: "pi-nvidia-plus: проверка ключей на {modelId} за {seconds} с — живые: {ok}, мёртвые: {dead}, лимитированы: {limited}, не определены: {unknown}{deadList}",
+  },
+  keysCheckDeadList: {
+    en: "; dead (removed from rotation for this session): {ids}",
+    ru: "; мёртвые (исключены из ротации до конца сессии): {ids}",
+  },
+  keysCheckFailed: {
+    en: "pi-nvidia-plus: key check failed — {error}",
+    ru: "pi-nvidia-plus: проверка ключей не удалась — {error}",
+  },
+  rotationSwitchMore: {
+    en: " (and {count} more switches in the last 5 s)",
+    ru: " (и ещё {count} переключений за 5 с)",
+  },
+
+  cmdRootDesc: {
+    en: "pi-nvidia-plus: subcommand — apply|rollback|status|keys|discover (autocomplete lists them)",
+    ru: "pi-nvidia-plus: подкоманда — apply|rollback|status|keys|discover (автодополнение перечислит)",
+  },
+  cmdUsage: {
+    en: "pi-nvidia-plus subcommands: {list}",
+    ru: "подкоманды pi-nvidia-plus: {list}",
+  },
+  cmdUnknown: {
+    en: "pi-nvidia-plus: unknown subcommand “{command}”. Available: {list}",
+    ru: "pi-nvidia-plus: неизвестная подкоманда «{command}». Доступны: {list}",
+  },
+
   // ── Метрики сессии (тикет 20) ─────────────────────────────────────────
   metricsSummary: {
     en: "session: {total} responses ({statuses}){groups}",
