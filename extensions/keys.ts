@@ -379,10 +379,7 @@ export class KeyRotator {
   // мёртвых ключах и кулдаунах. Все записи TTL-ные (см. формат в тикете).
   private sharedPath: string | undefined;
   private sharedStamp = ""; // mtime:size последней прочитанной/записанной версии
-  private sharedLastWrite = 0;
-  private sharedDirty = false;
-  private sharedFlushTimer: ReturnType<typeof setTimeout> | undefined;
-  private static readonly SHARED_WRITE_THROTTLE_MS = 300;
+
 
   /** Подключить разделяемый файл состояния (тикет 26). Идемпотентно. */
   attachSharedState(path: string): void {
@@ -423,23 +420,11 @@ export class KeyRotator {
    * выбрасывается. Троттлинг 300 мс; недописанное допишет следующая пометка.
    */
   private persistShared(now: number): void {
+    // Тикет 26: запись сквозная, без троттлинга — короткоживущие дети
+    // pi-subagents (pi -p) могут завершиться до срабатывания отложенной
+    // записи, и последняя пометка потеряется (живое воспроизведение в
+    // тикете). Пометки редки (одна на отказ ключа), файл мал — пишем всегда.
     if (!this.sharedPath) return;
-    if (now - this.sharedLastWrite < KeyRotator.SHARED_WRITE_THROTTLE_MS) {
-      this.sharedDirty = true;
-      // Дописываем задолженность таймером: иначе сессия, завершившаяся в окне
-      // троттла, потеряла бы последнюю пометку. unref — процесс не держим.
-      this.sharedFlushTimer ??= setTimeout(() => {
-        this.sharedFlushTimer = undefined;
-        if (this.sharedDirty) {
-          this.sharedLastWrite = 0;
-          this.persistShared(Date.now());
-        }
-      }, KeyRotator.SHARED_WRITE_THROTTLE_MS);
-      this.sharedFlushTimer.unref();
-      return;
-    }
-    this.sharedLastWrite = now;
-    this.sharedDirty = false;
     let existing: SharedStateFile = {};
     try {
       existing = JSON.parse(readFileSync(this.sharedPath, "utf8")) as SharedStateFile;
