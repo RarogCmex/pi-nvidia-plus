@@ -14,7 +14,7 @@
  * Расширение файл только читает; запись — всегда вручную. Ключи никогда не
  * попадают в отчёты целиком — только маскированные суффиксы (`maskKey`).
  */
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { t } from "./i18n.ts";
 
 export const DEFAULT_KEYS_FILE_NAME = "nvidia-keys.json";
@@ -356,6 +356,13 @@ export interface KeyRotatorOptions {
  * `beginRequest` заводит кольцо на запрос: ключ пи первый, хвост пула
  * развёрнут псевдослучайным циклическим сдвигом (см. `beginRequest`).
  */
+interface SharedStateFile {
+  /** Мёртвые ключи — постоянные (401/403 финальны и между запусками; тикет 26). */
+  dead?: string[];
+  /** Кулдауны — TTL-ные: значение это абсолютный дедлайн, просроченные отмирают. */
+  cooldownUntil?: Record<string, number>;
+}
+
 export class KeyRotator {
   private pool: string[] = [];
   // Кулдауны (тикет 22): бакет на пару (ключ, модель) — рейт-лимит NIM так
@@ -367,6 +374,101 @@ export class KeyRotator {
   // Занятость ключей параллельными запросами (тикет 25, pi-subagents):
   // веер детей не должен валиться на один ключ лишь потому, что он липкий.
   private inFlight = new Map<string, number>();
+  // Разделяемое между процессами состояние (тикет 26): дети pi-subagents —
+  // отдельные процессы pi со своими KeyRotator; файл даёт общую память о
+  // мёртвых ключах и кулдаунах. Все записи TTL-ные (см. формат в тикете).
+  private sharedPath: string | undefined;
+  private sharedStamp = ""; // mtime:size последней прочитанной/записанной версии
+  private sharedLastWrite = 0;
+  private sharedDirty = false;
+  private sharedFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private static readonly SHARED_WRITE_THROTTLE_MS = 300;
+
+  /** Подключить разделяемый файл состояния (тикет 26). Идемпотентно. */
+  attachSharedState(path: string): void {
+    this.sharedPath = path;
+  }
+
+  /** Подтянуть свежие записи из файла (просроченные TTL игнорируются). */
+  private mergeShared(now: number): void {
+    if (!this.sharedPath) return;
+    let stamp: string;
+    try {
+      const st = statSync(this.sharedPath);
+      stamp = `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return; // файла ещё нет — нормально
+    }
+    if (stamp === this.sharedStamp) return;
+    this.sharedStamp = stamp;
+    let parsed: SharedStateFile;
+    try {
+      parsed = JSON.parse(readFileSync(this.sharedPath, "utf8")) as SharedStateFile;
+    } catch {
+      return; // битый файл — игнорим, при записи перезапишем
+    }
+    for (const key of parsed.dead ?? []) {
+      if (typeof key === "string" && key) this.dead.add(key);
+    }
+    for (const [bucket, until] of Object.entries(parsed.cooldownUntil ?? {})) {
+      if (typeof until !== "number" || until <= now) continue;
+      const existing = this.cooldownUntil.get(bucket) ?? 0;
+      if (until > existing) this.cooldownUntil.set(bucket, until); // merge по max
+    }
+  }
+
+  /**
+   * Выгрузить своё состояние в файл: dead с TTL 24 ч, кулдауны — со своими
+   * дедлайнами. Мержится с текущим содержимым (max/union), просроченное
+   * выбрасывается. Троттлинг 300 мс; недописанное допишет следующая пометка.
+   */
+  private persistShared(now: number): void {
+    if (!this.sharedPath) return;
+    if (now - this.sharedLastWrite < KeyRotator.SHARED_WRITE_THROTTLE_MS) {
+      this.sharedDirty = true;
+      // Дописываем задолженность таймером: иначе сессия, завершившаяся в окне
+      // троттла, потеряла бы последнюю пометку. unref — процесс не держим.
+      this.sharedFlushTimer ??= setTimeout(() => {
+        this.sharedFlushTimer = undefined;
+        if (this.sharedDirty) {
+          this.sharedLastWrite = 0;
+          this.persistShared(Date.now());
+        }
+      }, KeyRotator.SHARED_WRITE_THROTTLE_MS);
+      this.sharedFlushTimer.unref();
+      return;
+    }
+    this.sharedLastWrite = now;
+    this.sharedDirty = false;
+    let existing: SharedStateFile = {};
+    try {
+      existing = JSON.parse(readFileSync(this.sharedPath, "utf8")) as SharedStateFile;
+    } catch {
+      // нет/битый — начинаем с пустого
+    }
+    const dead = new Set<string>((existing.dead ?? []).filter((k) => typeof k === "string" && k));
+    const cooldowns: Record<string, number> = {};
+    for (const [bucket, until] of Object.entries(existing.cooldownUntil ?? {})) {
+      if (typeof until === "number" && until > now) cooldowns[bucket] = until;
+    }
+    for (const key of this.dead) dead.add(key);
+    for (const [bucket, until] of this.cooldownUntil) {
+      if (until > now) cooldowns[bucket] = Math.max(cooldowns[bucket] ?? 0, until);
+    }
+    const tmp = `${this.sharedPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ dead: [...dead], cooldownUntil: cooldowns }), { mode: 0o600 });
+      renameSync(tmp, this.sharedPath);
+      try {
+        const st = statSync(this.sharedPath);
+        this.sharedStamp = `${st.mtimeMs}:${st.size}`; // своя запись — не перечитывать
+      } catch {
+        // ок
+      }
+    } catch {
+      // разделяемое состояние — best effort: писать не смогли, живём в памяти
+    }
+  }
   private active: string | undefined;
   private readonly random: () => number;
 
@@ -433,6 +535,7 @@ export class KeyRotator {
    * Порядок внутри круга и липкость активного ключа не меняются.
    */
   beginRequest(requestKey: string | undefined, _now: number, model?: string): RotationRequest {
+    this.mergeShared(_now); // тикет 26: свежие чужие dead/кулдауны до выбора ключа
     const ring: string[] = [];
     if (requestKey) ring.push(requestKey);
     for (const key of this.pool) if (!ring.includes(key)) ring.push(key);
@@ -461,15 +564,20 @@ export class KeyRotator {
    * модели этого ключа остаются готовыми (тикет 22, анатомия — тикет 21).
    */
   markRateLimited(key: string, cooldownMs: number, now: number, model?: string): void {
+    // Просроченный кулдаун не считается свежим: повторный 429 продлевает бакет
+    // от текущего момента; ключ, отлежавший лимит, вновь активен (тикет 26).
     this.cooldownUntil.set(this.bucket(key, model), now + Math.max(0, cooldownMs));
+    this.persistShared(now);
   }
 
   /** 401/403: ключ мёртв до конца сессии (для всех моделей — аккаунтный уровень). */
-  markDead(key: string): void {
+  // `now` опционален для обратной совместимости (тесты, старые вызовы).
+  markDead(key: string, now: number = Date.now()): void {
     this.dead.add(key);
     for (const bucketName of [...this.cooldownUntil.keys()]) {
       if (bucketName === key || bucketName.endsWith(`\n${key}`)) this.cooldownUntil.delete(bucketName);
     }
+    this.persistShared(now); // тикет 26: смерть ключа узнают и другие процессы
   }
 
   /**

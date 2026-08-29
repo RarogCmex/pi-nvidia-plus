@@ -192,6 +192,12 @@ const keyPool = new KeyPool({
   onWarn: (message) => proxyState.notify?.(message, "warning"),
 });
 const keyRotator = new KeyRotator();
+// Тикет 26: общая память о мёртвых/кулдаунах между процессами pi (дети
+// pi-subagents — отдельные процессы со своим KeyRotator). Выключатель:
+// NVIDIA_NIM_SHARED_ROTATION=0. Включается только при заданном пуле.
+if (keyPool.hasSource() && !/^(0|false|no|off)$/i.test(process.env.NVIDIA_NIM_SHARED_ROTATION?.trim() ?? "")) {
+  keyRotator.attachSharedState(join(homedir(), ".pi", "agent", "nvidia-keys-state.json"));
+}
 const keyRotationState = {
   enabled: (() => {
     const raw = process.env.NVIDIA_NIM_KEY_ROTATION?.trim().toLowerCase();

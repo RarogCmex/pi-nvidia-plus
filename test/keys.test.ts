@@ -493,6 +493,64 @@ function keys(pick: RotationPick): string | undefined {
   assert.equal(r.inFlightCount("nvapi-pi"), 0);
 }
 
+// ── Тикет 26: разделяемое состояние ротатора между процессами ───────────────
+
+// 26.1. Мёртвый ключ одного процесса виден другому; без TTL (финал и между запусками).
+{
+  const d = freshDir("shared-1");
+  const file = join(d, "state.json");
+  const a = new KeyRotator({ random: () => 0 });
+  const b = new KeyRotator({ random: () => 0 });
+  a.attachSharedState(file);
+  b.attachSharedState(file);
+  a.markDead("nvapi-zombie");
+  const req = b.beginRequest("nvapi-zombie", 0);
+  assert.ok(b.isDead("nvapi-zombie"), "второй процесс увидел мёртвый ключ из файла");
+  assert.deepEqual(req.report(0).map((s) => s.state), ["dead"]);
+}
+
+// 26.2. Кулдаун разделяется и имеет TTL: просроченный бакет ключа «оживает».
+{
+  const d = freshDir("shared-2");
+  const file = join(d, "state.json");
+  const a = new KeyRotator({ random: () => 0 });
+  const b = new KeyRotator({ random: () => 0 });
+  a.attachSharedState(file);
+  b.attachSharedState(file);
+  a.markRateLimited("nvapi-x", 5_000, 10_000, "moonshotai/kimi-k3");
+  b.beginRequest("nvapi-x", 11_000);
+  assert.equal(b.cooldownLeft("nvapi-x", 11_000, "moonshotai/kimi-k3"), 4_000, "кулдаун доехал в другой процесс");
+  assert.equal(b.cooldownLeft("nvapi-x", 11_000, "minimaxai/minimax-m3"), 0, "модельный бакет соблюдён");
+  b.beginRequest("nvapi-x", 16_001);
+  assert.equal(b.cooldownLeft("nvapi-x", 16_001, "moonshotai/kimi-k3"), 0, "TTL истёк — ключ снова готов");
+}
+
+// 26.3. Merge по max: более поздний кулдаун побеждает, короткий своего не отбрасывает.
+{
+  const d = freshDir("shared-3");
+  const file = join(d, "state.json");
+  const a = new KeyRotator({ random: () => 0 });
+  const b = new KeyRotator({ random: () => 0 });
+  a.attachSharedState(file);
+  b.attachSharedState(file);
+  a.markRateLimited("nvapi-x", 60_000, 0);
+  b.beginRequest("nvapi-x", 0);
+  b.markRateLimited("nvapi-x", 10_000, 0); // более короткий — не должен укоротить 60 с
+  a.beginRequest("nvapi-x", 0); // перечитает
+  assert.equal(a.cooldownLeft("nvapi-x", 0), 60_000, "merge не укорачивает");
+}
+
+// 26.4. Без attach или без файла — ротатор живёт в памяти, как раньше.
+{
+  const r = new KeyRotator({ random: () => 0 });
+  r.markDead("nvapi-x");
+  assert.ok(r.isDead("nvapi-x"));
+  const b = new KeyRotator({ random: () => 0 });
+  b.attachSharedState(join(freshDir("shared-4"), "missing.json"));
+  b.beginRequest("nvapi-x", 0); // файла нет — не падает
+  assert.ok(!b.isDead("nvapi-x"));
+}
+
 console.log("keys: все проверки прошли");
 
 // 22.6. statusFor с моделью показывает модельный бакет; без — как раньше.
