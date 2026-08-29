@@ -461,9 +461,91 @@ export class KeyRotator {
     this.random = opts?.random ?? Math.random;
   }
 
-  /** Пул из файла/окружения (без ключа пи). Дубликаты убираются, порядок сохраняется. */
+  /**
+   * Пул из файла/окружения (без ключа пи). Дубликаты убираются, порядок
+   * сохраняется. Тикет 26 (дополнение): при смене состава пула разделяемое
+   * состояние сверяется с ним — записи о ключах, которых в пуле больше нет,
+   * выбрасываются из файла и памяти. Это же «оживление» мёртвых: ключ
+   * перезавели и обновили файл пула — забытая смерть не тянется за ним.
+   */
   setPool(keys: string[]): void {
-    this.pool = [...new Set(keys)];
+    const next = [...new Set(keys)];
+    const changed = next.length !== this.pool.length || next.some((k, i) => k !== this.pool[i]);
+    this.pool = next;
+    if (changed) this.reconcileSharedWithPool();
+  }
+
+  /** Ключ из бакета кулдауна: `модель\nключ` или просто ключ. */
+  private static keyOfBucket(bucket: string): string {
+    const nl = bucket.indexOf("\n");
+    return nl < 0 ? bucket : bucket.slice(nl + 1);
+  }
+
+  /** Выбросить из разделяемого состояния (и памяти) ключи, выбывшие из пула. */
+  private reconcileSharedWithPool(): void {
+    const poolSet = new Set(this.pool);
+    // Память чистим всегда (дёшево), файл — только при наличии стирки.
+    let memoryChanged = false;
+    for (const key of [...this.dead]) {
+      if (!poolSet.has(key)) {
+        this.dead.delete(key);
+        memoryChanged = true;
+      }
+    }
+    for (const bucket of [...this.cooldownUntil.keys()]) {
+      if (!poolSet.has(KeyRotator.keyOfBucket(bucket))) {
+        this.cooldownUntil.delete(bucket);
+        memoryChanged = true;
+      }
+    }
+    if (!this.sharedPath) return;
+    // Файл: перечитать свежую версию (чужие записи тоже сверяем — отсюда и
+    // консистентная чистка для всех процессов) и переписать, если нашли
+    // записи о выбывших ключах.
+    let existing: SharedStateFile;
+    try {
+      existing = JSON.parse(readFileSync(this.sharedPath, "utf8")) as SharedStateFile;
+    } catch {
+      if (memoryChanged) return; // файла нет — чистить нечего
+      return;
+    }
+    const dead = (existing.dead ?? []).filter((k) => typeof k === "string" && poolSet.has(k));
+    const cooldownUntil: Record<string, number> = {};
+    const now = Date.now();
+    let changed = false;
+    for (const [bucket, until] of Object.entries(existing.cooldownUntil ?? {})) {
+      if (typeof until !== "number" || until <= now) {
+        changed = true; // заодно выбрасываем просроченные
+        continue;
+      }
+      if (!poolSet.has(KeyRotator.keyOfBucket(bucket))) {
+        changed = true;
+        continue;
+      }
+      cooldownUntil[bucket] = until;
+    }
+    if (dead.length !== (existing.dead ?? []).length) changed = true;
+    if (!changed) return;
+    const tmp = `${this.sharedPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ dead, cooldownUntil }), { mode: 0o600 });
+      renameSync(tmp, this.sharedPath);
+      // Содержимое мы только что записали сами — сольём оставленное в память,
+      // иначе обновлённый штамп заставит mergeShared пропустить чтение.
+      for (const key of dead) this.dead.add(key);
+      for (const [bucket, until] of Object.entries(cooldownUntil)) {
+        const existingUntil = this.cooldownUntil.get(bucket) ?? 0;
+        if (until > existingUntil) this.cooldownUntil.set(bucket, until);
+      }
+      try {
+        const st = statSync(this.sharedPath);
+        this.sharedStamp = `${st.mtimeMs}:${st.size}`;
+      } catch {
+        // ок
+      }
+    } catch {
+      // best effort: сможем при следующей сверке
+    }
   }
 
   poolKeys(): string[] {

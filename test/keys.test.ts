@@ -7,7 +7,7 @@
  * Все файловые пробы — во временном каталоге; реальный ~/.pi не трогается.
  */
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -549,6 +549,31 @@ function keys(pick: RotationPick): string | undefined {
   b.attachSharedState(join(freshDir("shared-4"), "missing.json"));
   b.beginRequest("nvapi-x", 0); // файла нет — не падает
   assert.ok(!b.isDead("nvapi-x"));
+}
+
+// 26.5. Сверка с пулом: записи о выбывших из nvidia-keys.json ключах
+// выбрасываются из файла и памяти (и заодно просроченные кулдауны).
+{
+  const d = freshDir("shared-5");
+  const file = join(d, "state.json");
+  writeFileSync(file, JSON.stringify({
+    dead: ["nvapi-old-dead", "nvapi-kept"],
+    cooldownUntil: {
+      "nvapi-kept": Date.now() + 60_000,
+      "moonshotai/kimi-k3\nnvapi-old-dead": Date.now() + 60_000,
+      "nvapi-expired": Date.now() - 1_000, // просроченный
+    },
+  }));
+  const r = new KeyRotator({ random: () => 0 });
+  r.attachSharedState(file);
+  r.setPool(["nvapi-kept"]); // nvapi-old-dead и nvapi-expired в пуле отсутствуют
+  const after = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(after.dead, ["nvapi-kept"], "мёртвые не из пула выброшены");
+  assert.deepEqual(Object.keys(after.cooldownUntil), ["nvapi-kept"], "кулдауны выбывших и просроченные выброшены");
+  assert.equal(r.isDead("nvapi-old-dead"), false, "память подчищена");
+  // Оставшийся в пуле dead-ключ приезжает из файла при мерже.
+  r.beginRequest("nvapi-kept", Date.now());
+  assert.ok(r.isDead("nvapi-kept"), "оставшийся в пуле мёртвый распознан");
 }
 
 console.log("keys: все проверки прошли");
