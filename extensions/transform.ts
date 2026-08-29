@@ -24,7 +24,18 @@ const NEMOTRON_THINKING_MODELS = new Set([
   "nvidia/nemotron-3-super-120b-a12b",
   "nvidia/nemotron-3-ultra-550b-a55b",
   "nvidia/nemotron-3.5-lightning-30b-a3b",
+  // Тикет 19 (живые пробы 2026-08-30): chat_template_kwargs.enable_thinking,
+  // low_effort и top-level reasoning_effort/reasoning_budget принимаются;
+  // `enable_thinking` вне chat_template_kwargs отвергается 400.
+  "nvidia/nemotron-3-nano-30b-a3b",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
 ]);
+
+// Gemma 4 (тикет 19): в режиме мышления модель виснет — ответ не приходит
+// за 120 с (headers timeout) при любом plain/effort/enable_thinking=true;
+// с chat_template_kwargs.enable_thinking=false отвечает за ~2 с. Поэтому
+// мышление выключается насильно на любом уровне — иначе модель непригодна.
+const GEMMA4 = /^google\/gemma-4/;
 
 // ── Гипотезы из референсов ────────────────────────────────────────────────
 // Источник — `subprojects/pi-nvidia-nim-provider` (handlers/thinking.ts,
@@ -42,6 +53,9 @@ function minimaxThinkingMode(level: string): string {
 
 /** Что хук инжектит для модели+уровня (для статус-строки и /nvidia-plus-status). */
 export function thinkingPlan(modelId: string, level: string): string | undefined {
+  if (GEMMA4.test(modelId)) {
+    return "chat_template_kwargs.enable_thinking=false (модель виснет в режиме мышления)";
+  }
   if (modelId === MINIMAX_M3) {
     return `chat_template_kwargs.thinking_mode="${minimaxThinkingMode(level)}"`;
   }
@@ -74,6 +88,13 @@ function ensureChatTemplateKwargs(payload: Payload): Payload {
 
 /** Инжектит thinking по семейству; возвращает, изменён ли пейлоад. */
 function applyThinking(payload: Payload, modelId: string, level: string): boolean {
+  if (GEMMA4.test(modelId)) {
+    const kwargs = ensureChatTemplateKwargs(payload);
+    if (kwargs.enable_thinking === false) return false;
+    kwargs.enable_thinking = false;
+    delete kwargs.low_effort;
+    return true;
+  }
   if (modelId === MINIMAX_M3) {
     const kwargs = ensureChatTemplateKwargs(payload);
     const mode = minimaxThinkingMode(level);
@@ -216,13 +237,16 @@ function normalizeContentArrays(payload: Payload): boolean {
  */
 export function transformRequest(payload: Payload, ctx: TransformContext): TransformResult {
   let modified = false;
-  if (ctx.modelId && typeof ctx.thinkingLevel === "string") {
+  // Gemma 4 гасим даже без выбранного уровня: пи не присылает thinkingLevel
+  // для моделей без reasoning-флага, а она без enable_thinking=false виснет.
+  const level = ctx.thinkingLevel ?? (ctx.modelId && GEMMA4.test(ctx.modelId) ? "off" : undefined);
+  if (ctx.modelId && typeof level === "string") {
     if (DEEPSEEK_V4.test(ctx.modelId)) {
-      modified = applyDeepSeekV4Thinking(payload, ctx.thinkingLevel) || modified;
+      modified = applyDeepSeekV4Thinking(payload, level) || modified;
     } else if (GLM.test(ctx.modelId)) {
-      modified = applyGlmThinking(payload, ctx.thinkingLevel) || modified;
+      modified = applyGlmThinking(payload, level) || modified;
     } else {
-      modified = applyThinking(payload, ctx.modelId, ctx.thinkingLevel) || modified;
+      modified = applyThinking(payload, ctx.modelId, level) || modified;
     }
   }
   modified = normalizeContentArrays(payload) || modified;

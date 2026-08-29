@@ -26,6 +26,30 @@
             "max": "on"
           }
         },
+        "nvidia/nemotron-3-nano-30b-a3b": {
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "off",
+            "minimal": "low",
+            "low": "low",
+            "medium": "on",
+            "high": "on",
+            "xhigh": "on",
+            "max": "on"
+          }
+        },
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "off",
+            "minimal": "low",
+            "low": "low",
+            "medium": "on",
+            "high": "on",
+            "xhigh": "on",
+            "max": "on"
+          }
+        },
         "nvidia/nemotron-3.5-lightning-30b-a3b": {
           "reasoning": true,
           "thinkingLevelMap": {

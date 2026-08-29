@@ -47,6 +47,7 @@ import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscove
 import { transformRequest, thinkingPlan, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
+import { SessionMetrics } from "./metrics.ts";
 import { t } from "./i18n.ts";
 import {
   parseProxyUrl,
@@ -60,6 +61,27 @@ import {
 } from "./proxy.ts";
 
 const PROVIDER = "nvidia";
+// Сессионные счётчики транспортного слоя (тикет 20): питаются из коллбэков
+// диспетчера, показываются в /nvidia-plus-status и /nvidia-plus-keys.
+const metrics = new SessionMetrics();
+
+/** Компактная сводка метрик для команд; пустую сессию не рябит. */
+function metricsSummary(): string {
+  if (metrics.totalResponses() === 0) return t("metricsNoResponses");
+  const { responses, groups } = metrics.formatParts();
+  const groupLabels: Record<string, string> = {
+    retries: t("metricsGroupRetries", { n: metrics.retries }),
+    keySwitches: t("metricsGroupKeySwitches", { n: metrics.keySwitches }),
+    deadKeys: t("metricsGroupDeadKeys", { n: metrics.deadKeys }),
+    cooldownWaits: t("metricsGroupCooldownWaits", { n: metrics.cooldownWaits }),
+  };
+  const extra = groups.length > 0 ? `; ${groups.map((g) => groupLabels[g.kind]).join("; ")}` : "";
+  return t("metricsSummary", {
+    total: metrics.totalResponses(),
+    statuses: responses.join(", ") || "—",
+    groups: extra,
+  });
+}
 const DEBUG = process.env.PI_NVIDIA_PLUS_DEBUG === "1";
 const DEBUG_LOG = join(homedir(), ".pi", "nvidia-plus-debug.log");
 
@@ -194,13 +216,17 @@ function notifyRotationIntro(ui: { notify: Notifier }): void {
 // сессиях расширение не должно проявляться (критерий приёмки №5).
 let proxyIntroNotified = false;
 function notifyProxyIntro(ui: { notify: Notifier }): void {
-  if (proxyIntroNotified || !proxyState.configured || !proxyState.url) return;
+  // Тикет 18: ошибка разбора NVIDIA_NIM_PROXY тоже проявляется здесь —
+  // при ней configured сброшен, и гейт вида `configured && url` её молча
+  // проглатывал. Показываем один раз и только при выбранной nvidia-модели.
+  if (proxyIntroNotified) return;
+  if (!proxyState.installError && !(proxyState.configured && proxyState.url)) return;
   proxyIntroNotified = true;
   if (proxyState.installError) {
     ui.notify(t("proxyNotEnabled", { error: proxyState.installError }), "error");
     return;
   }
-  ui.notify(t("proxyIntro", { url: proxyState.url.toString().replace(/\/$/, "") }), "info");
+  ui.notify(t("proxyIntro", { url: proxyState.url!.toString().replace(/\/$/, "") }), "info");
   void preflightProxy();
 }
 
@@ -249,6 +275,7 @@ function ensureTransportInstalled(): void {
         getPoolKeys: () => keyPool.refresh(),
         enabled: () => keyRotationState.enabled,
         onSwitch: (info: { from: string; to: string; status: number }) => {
+          metrics.keySwitches++;
           debug("nvidia-rotation-switch", `${maskKey(info.from)} → ${maskKey(info.to)}`, {
             from: maskKey(info.from),
             to: maskKey(info.to),
@@ -260,6 +287,7 @@ function ensureTransportInstalled(): void {
           );
         },
         onDeadKey: (key: string, status: number) => {
+          metrics.deadKeys++;
           debug("nvidia-rotation-dead", `ключ ${maskKey(key)} мёртв (${status})`, { ключ: maskKey(key), статус: status });
           proxyState.notify?.(
             t("rotationDeadKey", { status, key: maskKey(key) }),
@@ -274,6 +302,7 @@ function ensureTransportInstalled(): void {
           );
         },
         onCooldownWait: (ms: number) => {
+          metrics.cooldownWaits++;
           const seconds = Math.max(1, Math.round(ms / 1000));
           debug("nvidia-rotation-wait", `все ключи в кулдауне, жду ${ms} мс`, {});
           proxyState.notify?.(t("rotationCooldownWait", { seconds }), "info");
@@ -308,6 +337,7 @@ function ensureTransportInstalled(): void {
       proxyUrl: proxyReady ? proxyState.url : undefined,
       rotation,
       onObserved: (status, headers) => {
+        metrics.noteResponse(status);
         debug("nvidia-response", `status=${status}`, { status, headers });
         if (status === 404 || status === 410) {
           // Уведомляем только для запросов с известной моделью: внутренние запросы
@@ -347,6 +377,7 @@ function ensureTransportInstalled(): void {
         ? {
             ...TRANSPORT_RETRY,
             onRetryScheduled: (info) => {
+              metrics.retries++;
               debug("nvidia-retry", `статус=${info.status}, повтор ${info.attempt}, задержка ${info.delayMs} мс`, info);
               const seconds = Math.max(1, Math.round(info.delayMs / 1000));
               proxyState.notify?.(
@@ -410,9 +441,8 @@ function initProxyFromEnv(): void {
     proxyState.url = parsed.url;
   }
   ensureTransportInstalled(); // ставится и без прокси, если задан пул ключей (тикет 15)
-  if (proxyState.installError) {
-    proxyState.notify?.(t("proxyNotEnabled", { error: proxyState.installError }), "error");
-  }
+  // Ошибка разбора/установки показывается в notifyProxyIntro при выборе
+  // nvidia-модели (тикеты 16/18): здесь, на загрузке, UI-нотификатора ещё нет.
 }
 
 /** Строка статус-бара; `undefined` очищает ключ для не-`nvidia` моделей. */
@@ -659,6 +689,8 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     description: t("cmdStatusDesc"),
     handler: async (_args, ctx) => {
       const auto = loadState()?.enabled === false ? t("statusAutoOff") : t("statusAutoOn");
+      // Тикет 18: при битом разборе configured сброшен — показываем ошибку,
+      // а не «не настроен», чтобы опечатка в переменной не молчала.
       const proxy = proxyState.configured
         ? proxyState.installError
           ? t("statusProxyInstallError", { url: proxyState.url?.toString() ?? "?", error: proxyState.installError })
@@ -667,12 +699,15 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             : proxyState.installed
               ? t("statusProxyInstalled", { url: proxyState.url?.toString() ?? "?" })
               : t("statusProxyPlain", { url: proxyState.url?.toString() ?? "?" })
-        : t("statusProxyNotConfigured");
+        : proxyState.installError
+          ? t("statusProxyInstallError", { url: "?", error: proxyState.installError })
+          : t("statusProxyNotConfigured");
       const retryState = proxyState.configured || keyPool.hasSource()
         ? transportRetryEnabled()
           ? t("statusRetryOn", { count: TRANSPORT_RETRY.maxRetries })
           : t("statusRetryOff")
         : undefined;
+      const metricsState = metricsSummary();
       const rotationState = keyPool.hasSource()
         ? t(keyRotationState.enabled ? "statusRotationOn" : "statusRotationOff", {
             source: keyPool.describe(),
@@ -682,7 +717,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const model = ctx.model;
       if (!model || model.provider !== PROVIDER) {
         ctx.ui.notify(
-          `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): ${t("statusNotNvidia", { model: model ? `${model.provider}/${model.id}` : "none" })}`,
+          `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}; ${metricsState}): ${t("statusNotNvidia", { model: model ? `${model.provider}/${model.id}` : "none" })}`,
           "info",
         );
         return;
@@ -690,7 +725,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const level = ctx.thinkingLevel;
       const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
       ctx.ui.notify(
-        `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}): ${t("statusThinking", {
+        `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}; ${metricsState}): ${t("statusThinking", {
           modelId: model.id,
           level: level ?? "?",
           plan: plan ? t("statusInjectsPlan", { plan }) : t("statusNoInjection"),
@@ -746,8 +781,8 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
           state: rotation,
           source: keyPool.describe(),
           count: poolKeys.length,
-          rows: rows.join("; "),
-          hint: installedHint,
+          rows: rows.join("; ") + (rows.length > 0 ? "; " : ""),
+          hint: installedHint ? `${installedHint}; ${metricsSummary()}` : metricsSummary(),
         }),
         "info",
       );

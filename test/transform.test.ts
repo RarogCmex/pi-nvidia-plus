@@ -175,4 +175,29 @@ assert.equal(thinkingPlan(DSV4, "high"), "chat_template_kwargs.thinking=true, re
 assert.equal(thinkingPlan(GLM, "off"), "chat_template_kwargs.enable_thinking=false, clear_thinking=true");
 assert.equal(thinkingPlan(GLM, "high"), "chat_template_kwargs.enable_thinking=true, clear_thinking=false, reasoning_effort=high");
 
+// 11. Nemotron 3-nano и omni (живые пробы тикета 19): та же механика, что у super/lightning.
+for (const modelId of ["nvidia/nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"]) {
+  const off = transformRequest({ model: modelId }, { modelId, thinkingLevel: "off" });
+  assert.equal(kwargs(off.payload).enable_thinking, false, `${modelId} off`);
+  const low = transformRequest({ model: modelId }, { modelId, thinkingLevel: "low" });
+  assert.equal(kwargs(low.payload).enable_thinking, true, `${modelId} low`);
+  assert.equal(kwargs(low.payload).low_effort, true, `${modelId} low: low_effort`);
+  const high = transformRequest({ model: modelId }, { modelId, thinkingLevel: "high" });
+  assert.equal(kwargs(high.payload).enable_thinking, true, `${modelId} high`);
+  assert.ok(!("low_effort" in kwargs(high.payload)), `${modelId} high: low_effort удалён`);
+}
+assert.equal(
+  thinkingPlan("nvidia/nemotron-3-nano-30b-a3b", "off"),
+  "chat_template_kwargs.enable_thinking=false",
+);
+
+// 12. Gemma 4 (живые пробы тикета 19): мышление виснет (120 с без заголовков),
+// работает только с enable_thinking=false — мышление выключается насильно на любом уровне.
+const GEMMA4 = "google/gemma-4-31b-it";
+for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+  const r = transformRequest({ model: GEMMA4 }, { modelId: GEMMA4, thinkingLevel: level });
+  assert.equal(kwargs(r.payload).enable_thinking, false, `gemma-4 ${level}: мышление должно быть выключено`);
+}
+assert.equal(thinkingPlan(GEMMA4, "high"), "chat_template_kwargs.enable_thinking=false (модель виснет в режиме мышления)");
+
 console.log("transform: все проверки прошли");

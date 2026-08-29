@@ -49,6 +49,32 @@ export const MESSAGES = {
     en: "pi-nvidia-plus: proxy not enabled — {error}",
     ru: "pi-nvidia-plus: прокси не включён — {error}",
   },
+
+  // ── Метрики сессии (тикет 20) ─────────────────────────────────────────
+  metricsSummary: {
+    en: "session: {total} responses ({statuses}){groups}",
+    ru: "сессия: ответов {total} ({statuses}){groups}",
+  },
+  metricsNoResponses: {
+    en: "session: no NIM responses observed yet",
+    ru: "сессия: ответов NIM пока не наблюдалось",
+  },
+  metricsGroupRetries: {
+    en: "retries: {n}",
+    ru: "повторов: {n}",
+  },
+  metricsGroupKeySwitches: {
+    en: "key switches: {n}",
+    ru: "переключений ключа: {n}",
+  },
+  metricsGroupDeadKeys: {
+    en: "dead keys: {n}",
+    ru: "мёртвых ключей: {n}",
+  },
+  metricsGroupCooldownWaits: {
+    en: "cooldown waits: {n}",
+    ru: "ожиданий кулдауна: {n}",
+  },
   proxyUndiciNotFound: {
     en: "could not locate pi's undici (bases: {bases})",
     ru: "не удалось найти undici пи (базы: {bases})",
