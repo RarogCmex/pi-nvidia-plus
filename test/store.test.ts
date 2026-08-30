@@ -40,10 +40,13 @@ function readModels(paths: StorePaths): any {
 }
 
 // 1. Пути строятся от базового каталога; дефолты — как раньше (~/.pi/agent).
-const paths = storePaths("/tmp/base");
-assert.equal(paths.modelsJson, "/tmp/base/models.json");
-assert.equal(paths.stateFile, "/tmp/base/nvidia-plus-models.json");
-assert.equal(paths.backupFile, "/tmp/base/models.json.bak-pi-nvidia-plus");
+// База произвольная; ожидания собираем через join, а не строковыми
+// литералами с "/" — иначе на Windows сравнение упадёт из-за разделителей.
+const base = join("tmp", "base");
+const paths = storePaths(base);
+assert.equal(paths.modelsJson, join(base, "models.json"));
+assert.equal(paths.stateFile, join(base, "nvidia-plus-models.json"));
+assert.equal(paths.backupFile, join(base, "models.json.bak-pi-nvidia-plus"));
 const defaults = storePaths();
 assert.ok(defaults.modelsJson.endsWith(join(".pi", "agent", "models.json")), "дефолт сменился");
 
