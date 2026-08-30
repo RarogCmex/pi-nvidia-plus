@@ -14,7 +14,7 @@
  * Расширение файл только читает; запись — всегда вручную. Ключи никогда не
  * попадают в отчёты целиком — только маскированные суффиксы (`maskKey`).
  */
-import { readFileSync, statSync, writeFileSync, renameSync } from "node:fs";
+import { copyFileSync, readFileSync, rmSync, statSync, writeFileSync, renameSync } from "node:fs";
 import { t } from "./i18n.ts";
 
 export const DEFAULT_KEYS_FILE_NAME = "nvidia-keys.json";
@@ -209,6 +209,8 @@ export class KeyPool {
       return this.loaded.keys;
     }
 
+    // 0o600 — POSIX-only: на Windows chmod-маски не действуют, защита файла
+    // разделяемого состояния и пула опирается на NTFS-ACL каталога пользователя.
     if (mode !== undefined && (mode & 0o777) !== 0o600 && process.platform !== "win32") {
       if (!this.warnedPerms) {
         this.warnedPerms = true;
@@ -363,6 +365,23 @@ interface SharedStateFile {
   cooldownUntil?: Record<string, number>;
 }
 
+/**
+ * Замена файла через rename. На Windows `renameSync` поверх файла, который
+ * кто-то держит открытым (антивирус, индексатор, другой процесс пи), бросает
+ * EPERM/EEXIST — fallback: копирование + удаление. Атомарность теряется, но
+ * разделяемое состояние и так best effort.
+ */
+function renamePortable(tmp: string, target: string): void {
+  try {
+    renameSync(tmp, target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EPERM" && code !== "EEXIST" && code !== "EBUSY") throw err;
+    copyFileSync(tmp, target);
+    rmSync(tmp, { force: true });
+  }
+}
+
 export class KeyRotator {
   private pool: string[] = [];
   // Кулдауны (тикет 22): бакет на пару (ключ, модель) — рейт-лимит NIM так
@@ -443,7 +462,7 @@ export class KeyRotator {
     const tmp = `${this.sharedPath}.${process.pid}.tmp`;
     try {
       writeFileSync(tmp, JSON.stringify({ dead: [...dead], cooldownUntil: cooldowns }), { mode: 0o600 });
-      renameSync(tmp, this.sharedPath);
+      renamePortable(tmp, this.sharedPath);
       try {
         const st = statSync(this.sharedPath);
         this.sharedStamp = `${st.mtimeMs}:${st.size}`; // своя запись — не перечитывать
@@ -529,7 +548,7 @@ export class KeyRotator {
     const tmp = `${this.sharedPath}.${process.pid}.tmp`;
     try {
       writeFileSync(tmp, JSON.stringify({ dead, cooldownUntil }), { mode: 0o600 });
-      renameSync(tmp, this.sharedPath);
+      renamePortable(tmp, this.sharedPath);
       // Содержимое мы только что записали сами — сольём оставленное в память,
       // иначе обновлённый штамп заставит mergeShared пропустить чтение.
       for (const key of dead) this.dead.add(key);
