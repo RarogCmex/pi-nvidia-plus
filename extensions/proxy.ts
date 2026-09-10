@@ -920,6 +920,15 @@ export interface InstallResult {
   installed: boolean;
   already: boolean;
   dispatcher?: unknown;
+  /** Внутренний nvidia-агент (ProxyAgent или прежний глобальный) — без ротации/повторов. Keys check берёт его, чтобы не открывать новое TCP к прокси. */
+  nvidiaDirect?: DispatchTarget;
+}
+
+/** Внутренний nvidia-агент последней установки — keep-alive пул. Keys check ходит сюда, не создаёт новый ProxyAgent. */
+let lastNvidiaDirect: DispatchTarget | undefined;
+
+export function getNvidiaDirectDispatcher(): DispatchTarget | undefined {
+  return lastNvidiaDirect;
 }
 
 /**
@@ -929,7 +938,9 @@ export interface InstallResult {
  */
 export function ensureDispatcherInstalled(deps: DispatcherDeps, options: InstallOptions): InstallResult {
   const current = deps.getGlobalDispatcher();
-  if (isOurDispatcher(current)) return { installed: false, already: true, dispatcher: current };
+  if (isOurDispatcher(current)) {
+    return { installed: false, already: true, dispatcher: current, nvidiaDirect: lastNvidiaDirect };
+  }
   // Нечего ставить: ни прокси, ни ротации — поведение как сегодня, обёртка не нужна.
   if (!options.proxyUrl && !options.rotation) return { installed: false, already: false };
   // Основание nvidia-маршрута: прокси-агент, либо (без прокси) прежний глобальный диспетчер.
@@ -953,5 +964,6 @@ export function ensureDispatcherInstalled(deps: DispatcherDeps, options: Install
   });
   const dispatcher = deps.adapt ? deps.adapt(duck) : duck;
   deps.setGlobalDispatcher(dispatcher);
-  return { installed: true, already: false, dispatcher };
+  lastNvidiaDirect = base;
+  return { installed: true, already: false, dispatcher, nvidiaDirect: base };
 }

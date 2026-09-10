@@ -75,12 +75,16 @@ export const MESSAGES = {
     ru: "pi-nvidia-plus: проверяю {count} ключей на {modelId} (по одному запросу, без ротации и повторов)…",
   },
   keysCheckSummary: {
-    en: "pi-nvidia-plus: key check on {modelId} in {seconds} s — alive: {ok}, dead: {dead}, rate-limited: {limited}, unclear: {unknown}{deadList}",
-    ru: "pi-nvidia-plus: проверка ключей на {modelId} за {seconds} с — живые: {ok}, мёртвые: {dead}, лимитированы: {limited}, не определены: {unknown}{deadList}",
+    en: "pi-nvidia-plus: key check on {modelId} in {seconds} s — alive: {ok}, dead: {dead}, rate-limited: {limited}, unclear: {unknown}{deadList}{unknownHint}",
+    ru: "pi-nvidia-plus: проверка ключей на {modelId} за {seconds} с — живые: {ok}, мёртвые: {dead}, лимитированы: {limited}, не определены: {unknown}{deadList}{unknownHint}",
   },
   keysCheckDeadList: {
     en: "; dead (removed from rotation for this session): {ids}",
     ru: "; мёртвые (исключены из ротации до конца сессии): {ids}",
+  },
+  keysCheckUnknownHint: {
+    en: "; unclear sample: {sample}",
+    ru: "; пример неопределённых: {sample}",
   },
   keysCheckFailed: {
     en: "pi-nvidia-plus: key check failed — {error}",

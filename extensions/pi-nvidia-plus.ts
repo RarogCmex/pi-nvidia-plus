@@ -47,6 +47,7 @@ import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscove
 import { transformRequest, thinkingPlan, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
+import { classifyKeyProbeStatus, keyCheckUnknownSample, type KeyCheckOutcome } from "./key-check.ts";
 import { SessionMetrics } from "./metrics.ts";
 import { t } from "./i18n.ts";
 import { completeArgs, formatCommandLine, nvidiaPlusArgSuggestions, nvidiaPlusCommands } from "./commands.ts";
@@ -58,6 +59,7 @@ import {
   formatDiagnostic,
   markDispatcher,
   NVIDIA_ORIGIN,
+  getNvidiaDirectDispatcher,
   type NimDiagnostic,
 } from "./proxy.ts";
 
@@ -240,14 +242,15 @@ function notifyProxyIntro(ui: { notify: Notifier }): void {
   void preflightProxy();
 }
 
-// ── Проверка пула ключей (тикет 23): `/nvidia-plus-keys check` ─────────────
-// Проба идёт напрямую (собственный ProxyAgent, вне установленных слоёв
-// ротации/повторов) — посторонние механики не должны маскировать результат
-// отдельного ключа. Прогрев по текущей выбранной nvidia-модели: пригодность
-// пула интересна именно для неё, «эталонной» модели у NIM нет.
-type KeyCheckOutcome = "ok" | "dead" | "limited" | "unknown";
+// ── Проверка пула ключей (тикет 23): `/nvidia-plus keys check` ─────────────
+// Проба идёт в обход ротации/повторов, но через ТОТ ЖЕ внутренний агент, что и
+// чат (`getNvidiaDirectDispatcher`): новый ProxyAgent открывает свежий TCP к
+// прокси и на этой сети получает EHOSTUNREACH, пока keep-alive чата жив.
+// NVCF-POLL-SECONDS намеренно не шлём: иначе 436 ключей на pro ждали бы генерацию;
+// 202 Accepted без long-poll — ключ жив (см. classifyKeyProbeStatus).
+type KeyCheckProbe = { outcome: KeyCheckOutcome; status?: number; error?: string };
 
-async function probeKeyOnce(undici: any, dispatcher: unknown, modelId: string, key: string): Promise<KeyCheckOutcome> {
+async function probeKeyOnce(undici: any, dispatcher: unknown, modelId: string, key: string): Promise<KeyCheckProbe> {
   try {
     const res = await undici.request("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
@@ -258,23 +261,23 @@ async function probeKeyOnce(undici: any, dispatcher: unknown, modelId: string, k
       bodyTimeout: 20_000,
     });
     await res.body.text();
-    if (res.statusCode === 200) return "ok";
-    if (res.statusCode === 401 || res.statusCode === 403) return "dead";
-    if (res.statusCode === 429) return "limited";
-    debug("keys-check", `ключ ${maskKey(key)} — статус ${res.statusCode}`, {});
-    return "unknown";
+    const outcome = classifyKeyProbeStatus(res.statusCode);
+    if (outcome === "unknown") debug("keys-check", `ключ ${maskKey(key)} — статус ${res.statusCode}`, {});
+    return { outcome, status: res.statusCode };
   } catch (e) {
-    debug("keys-check", `ключ ${maskKey(key)} — ${String(e).slice(0, 120)}`, {});
-    return "unknown";
+    const error = String(e).slice(0, 120);
+    debug("keys-check", `ключ ${maskKey(key)} — ${error}`, {});
+    return { outcome: "unknown", error };
   }
 }
 
 /** Параллельность 4 — компромисс между скоростью прогрева и лимитами NIM. */
-async function checkKeyPool(modelId: string, keysToCheck: string[]): Promise<Map<string, KeyCheckOutcome>> {
+async function checkKeyPool(modelId: string, keysToCheck: string[]): Promise<Map<string, KeyCheckProbe>> {
+  ensureTransportInstalled();
   const { undici, error } = resolvePiUndici();
   if (!undici) throw new Error(error ?? "undici недоступен");
-  const dispatcher = proxyState.configured && proxyState.url ? new undici.ProxyAgent(proxyState.url.toString()) : undefined;
-  const results = new Map<string, KeyCheckOutcome>();
+  const dispatcher = getNvidiaDirectDispatcher();
+  const results = new Map<string, KeyCheckProbe>();
   let cursor = 0;
   const worker = async (): Promise<void> => {
     while (cursor < keysToCheck.length) {
@@ -840,11 +843,17 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         try {
           const results = await checkKeyPool(model.id, poolKeys);
           const groups: Record<KeyCheckOutcome, string[]> = { ok: [], dead: [], limited: [], unknown: [] };
-          for (const [key, outcome] of results) groups[outcome].push(key);
+          const unknownProbes: KeyCheckProbe[] = [];
+          for (const [key, probe] of results) {
+            groups[probe.outcome].push(key);
+            if (probe.outcome === "unknown") unknownProbes.push(probe);
+          }
           // Мёртвые сразу помечаем в ротаторе — сессия их больше не трогает.
           for (const key of groups.dead) keyRotator.markDead(key);
           const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
           const deadList = groups.dead.length > 0 ? t("keysCheckDeadList", { ids: groups.dead.map(maskKey).join(", ") }) : "";
+          const sample = keyCheckUnknownSample(unknownProbes);
+          const unknownHint = sample ? t("keysCheckUnknownHint", { sample }) : "";
           ctx.ui.notify(
             t("keysCheckSummary", {
               modelId: model.id,
@@ -854,8 +863,9 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
               limited: groups.limited.length,
               unknown: groups.unknown.length,
               deadList,
+              unknownHint,
             }),
-            groups.dead.length > 0 ? "warning" : "info",
+            groups.dead.length > 0 || (groups.unknown.length > 0 && groups.ok.length === 0) ? "warning" : "info",
           );
         } catch (e) {
           ctx.ui.notify(t("keysCheckFailed", { error: e instanceof Error ? e.message : String(e) }), "error");

@@ -287,16 +287,19 @@ function makeTarget(name: string) {
   assert.equal(proxyErrors.length, 1);
   assert.ok(proxyErrors[0].includes("NVIDIA_NIM_PROXY") && proxyErrors[0].includes("ECONNREFUSED"), proxyErrors[0]);
 }
-// 10. Идемпотентная установка: маркер, повтор не ставит вторую обёртку
+// 10. Идемпотентная установка: маркер, повтор не ставит вторую обёртку.
+// nvidiaDirect — тот же ProxyAgent (keep-alive): keys check не должен
+// создавать новый (свежий connect даёт EHOSTUNREACH при живом чате).
 {
   const prevGlobal = makeTarget("prev-global");
+  const proxyAgent = makeTarget("proxy-agent");
   let current: unknown = prevGlobal;
   const setCalls: unknown[] = [];
   const result1 = ensureDispatcherInstalled(
     {
       getGlobalDispatcher: () => current,
       setGlobalDispatcher: (d) => { current = d; setCalls.push(d); },
-      createProxyAgent: (url) => makeTarget(`agent:${url}`),
+      createProxyAgent: () => proxyAgent,
     },
     { proxyUrl: new URL("http://192.168.88.248:8870/") },
   );
@@ -304,6 +307,8 @@ function makeTarget(name: string) {
   assert.equal(result1.already, false);
   assert.ok(isOurDispatcher(current));
   assert.equal(setCalls.length, 1);
+  assert.strictEqual(result1.nvidiaDirect, proxyAgent, "keys check переиспользует установленный ProxyAgent");
+  assert.notStrictEqual(result1.nvidiaDirect, current, "не обёртка с ротацией/наблюдателем");
 
   const result2 = ensureDispatcherInstalled(
     {
@@ -316,6 +321,7 @@ function makeTarget(name: string) {
   assert.equal(result2.already, true);
   assert.equal(result2.installed, false);
   assert.equal(setCalls.length, 1, "повторная установка");
+  assert.strictEqual(result2.nvidiaDirect, proxyAgent, "повторная установка не теряет keep-alive агент");
 
   // Прежний диспетчер сохранён как fallback
   const wrapper = current as { dispatch(opts: unknown, handler: unknown): boolean };
