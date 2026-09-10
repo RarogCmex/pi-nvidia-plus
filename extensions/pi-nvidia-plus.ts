@@ -49,6 +49,7 @@ import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
 import { SessionMetrics } from "./metrics.ts";
 import { t } from "./i18n.ts";
+import { completeArgs, nvidiaPlusCommands } from "./commands.ts";
 import {
   parseProxyUrl,
   ensureDispatcherInstalled,
@@ -797,6 +798,13 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   // ── Пул ключей NIM (тикеты 15/23) ───────────────────────────────────────
   const cmdKeys = async (args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
       const arg = (args ?? "").trim().toLowerCase();
+      if (arg && arg !== "check" && arg !== "off" && arg !== "on") {
+        const list = (nvidiaPlusCommands().find((c) => c.name === "keys")?.args ?? [])
+          .map((a) => `${a.name} — ${a.description}`)
+          .join("; ");
+        ctx.ui.notify(t("cmdKeysUnknown", { command: arg, list }), "info");
+        return;
+      }
       if (arg === "check") {
         // Тикет 23: проверка пула по текущей выбранной nvidia-модели.
         const model = ctx.model;
@@ -966,31 +974,26 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       }
   };
 
-  // ── Одна команда с подкомандами (тикет 24): меню не загромождается ──
+  // ── Одна команда с подкомандами (тикеты 24/27): меню не загромождается ──
   type CmdCtx = Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1];
-  const subcommands: Record<string, { description: string; run: (args: string | undefined, ctx: CmdCtx) => Promise<void> }> = {
-    apply: { description: t("cmdApplyDesc"), run: cmdApply },
-    rollback: { description: t("cmdRollbackDesc"), run: cmdRollback },
-    status: { description: t("cmdStatusDesc"), run: cmdStatus },
-    keys: { description: t("cmdKeysDesc"), run: cmdKeys },
-    discover: { description: t("cmdDiscoverDesc"), run: cmdDiscover },
+  const runners: Record<string, (args: string | undefined, ctx: CmdCtx) => Promise<void>> = {
+    apply: cmdApply,
+    rollback: cmdRollback,
+    status: cmdStatus,
+    keys: cmdKeys,
+    discover: cmdDiscover,
   };
 
   pi.registerCommand("nvidia-plus", {
     description: t("cmdRootDesc"),
-    getArgumentCompletions: (prefix: string) => {
-      const items = Object.entries(subcommands)
-        .map(([value, c]) => ({ value, label: `${value} — ${c.description}` }))
-        .filter((i) => i.value.startsWith(prefix));
-      return items.length > 0 ? items : null;
-    },
+    getArgumentCompletions: (prefix: string) => completeArgs(prefix, nvidiaPlusCommands()),
     handler: async (args, ctx) => {
       const trimmed = (args ?? "").trim();
       const [sub, ...rest] = trimmed.split(/\s+/).filter(Boolean);
-      const command = sub ? subcommands[sub] : undefined;
-      if (!command) {
-        const list = Object.entries(subcommands)
-          .map(([name, c]) => `${name} — ${c.description}`)
+      const run = sub ? runners[sub] : undefined;
+      if (!run) {
+        const list = nvidiaPlusCommands()
+          .map((c) => `${c.name} — ${c.description}`)
           .join("; ");
         ctx.ui.notify(
           t(sub ? "cmdUnknown" : "cmdUsage", { command: sub ?? "", list }),
@@ -998,7 +1001,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         );
         return;
       }
-      await command.run(rest.join(" "), ctx);
+      await run(rest.join(" "), ctx);
     },
   });
 }

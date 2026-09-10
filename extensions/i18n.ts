@@ -32,8 +32,24 @@ export const MESSAGES = {
     ru: "nvidia: текущая модель, уровень мышления и что инжектит хук",
   },
   cmdKeysDesc: {
-    en: "NIM key pool status; 'off'/'on' toggles rotation in the live session",
-    ru: "Статус пула ключей NIM; 'off'/'on' переключает ротацию в живой сессии",
+    en: "NIM key pool status; 'check' probes keys; 'off'/'on' toggles rotation in the live session",
+    ru: "Статус пула ключей NIM; 'check' проверяет ключи; 'off'/'on' переключает ротацию в живой сессии",
+  },
+  cmdKeysCheckDesc: {
+    en: "probe each pool key against the selected nvidia model",
+    ru: "проверить каждый ключ пула на выбранной nvidia-модели",
+  },
+  cmdKeysOnDesc: {
+    en: "enable key rotation in this session",
+    ru: "включить ротацию ключей в этой сессии",
+  },
+  cmdKeysOffDesc: {
+    en: "disable key rotation in this session",
+    ru: "выключить ротацию ключей в этой сессии",
+  },
+  cmdApplyForceDesc: {
+    en: "overwrite conflicting models.json entries",
+    ru: "перезаписать конфликтующие записи models.json",
   },
   cmdDiscoverDesc: {
     en: "Live NIM discovery: GET /v1/models, add new chat models, mark missing known models",
@@ -76,8 +92,8 @@ export const MESSAGES = {
   },
 
   cmdRootDesc: {
-    en: "pi-nvidia-plus: subcommand — apply|rollback|status|keys|discover (autocomplete lists them)",
-    ru: "pi-nvidia-plus: подкоманда — apply|rollback|status|keys|discover (автодополнение перечислит)",
+    en: "pi-nvidia-plus: subcommand — apply|rollback|status|keys|discover (autocomplete lists them and their args)",
+    ru: "pi-nvidia-plus: подкоманда — apply|rollback|status|keys|discover (автодополнение перечислит их и аргументы)",
   },
   cmdUsage: {
     en: "pi-nvidia-plus subcommands: {list}",
@@ -86,6 +102,10 @@ export const MESSAGES = {
   cmdUnknown: {
     en: "pi-nvidia-plus: unknown subcommand “{command}”. Available: {list}",
     ru: "pi-nvidia-plus: неизвестная подкоманда «{command}». Доступны: {list}",
+  },
+  cmdKeysUnknown: {
+    en: "pi-nvidia-plus keys: unknown argument “{command}”. Available: {list} (empty shows pool status)",
+    ru: "pi-nvidia-plus keys: неизвестный аргумент «{command}». Доступны: {list} (пустое показывает статус пула)",
   },
 
   // ── Метрики сессии (тикет 20) ─────────────────────────────────────────
