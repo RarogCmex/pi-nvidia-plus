@@ -49,7 +49,7 @@ import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
 import { SessionMetrics } from "./metrics.ts";
 import { t } from "./i18n.ts";
-import { completeArgs, nvidiaPlusCommands } from "./commands.ts";
+import { completeArgs, formatCommandLine, nvidiaPlusArgSuggestions, nvidiaPlusCommands } from "./commands.ts";
 import {
   parseProxyUrl,
   ensureDispatcherInstalled,
@@ -542,7 +542,25 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    if (ctx.hasUI) proxyState.notify = (message, type) => ctx.ui.notify(message, type);
+    if (ctx.hasUI) {
+      proxyState.notify = (message, type) => ctx.ui.notify(message, type);
+      // Tab после `/nvidia-plus ` в TUI идёт с force=true и минует
+      // getArgumentCompletions (файлы вместо подкоманд). Перехват сверху.
+      ctx.ui.addAutocompleteProvider((current) => ({
+        async getSuggestions(lines, cursorLine, cursorCol, options) {
+          const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
+          const ours = nvidiaPlusArgSuggestions(text);
+          if (ours) return ours;
+          return current.getSuggestions(lines, cursorLine, cursorCol, options);
+        },
+        applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+          return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+        },
+        shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+          return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+        },
+      }));
+    }
     // Пи мог пересоздать глобальный диспетчер до загрузки расширения.
     ensureTransportInstalled();
     // Прокси и ротация представляются только при выбранной модели nvidia (тикет 16).
@@ -992,9 +1010,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const [sub, ...rest] = trimmed.split(/\s+/).filter(Boolean);
       const run = sub ? runners[sub] : undefined;
       if (!run) {
-        const list = nvidiaPlusCommands()
-          .map((c) => `${c.name} — ${c.description}`)
-          .join("; ");
+        const list = nvidiaPlusCommands().map(formatCommandLine).join("; ");
         ctx.ui.notify(
           t(sub ? "cmdUnknown" : "cmdUsage", { command: sub ?? "", list }),
           "info",

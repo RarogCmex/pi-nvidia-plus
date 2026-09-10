@@ -23,10 +23,22 @@ export interface CommandSpec {
 export interface CompletionItem {
   value: string;
   label: string;
+  description?: string;
 }
 
 function item(value: string, name: string, description: string): CompletionItem {
-  return { value, label: `${name} — ${description}` };
+  return { value, label: name, description };
+}
+
+/** Подсказка второго уровня в подписи: `keys [check|on|off]`. */
+export function argsHint(command: CommandSpec): string {
+  if (!command.args?.length) return "";
+  return ` [${command.args.map((a) => a.name).join("|")}]`;
+}
+
+/** Строка для usage/unknown: `keys [check|on|off] — …`. */
+export function formatCommandLine(command: CommandSpec): string {
+  return `${command.name}${argsHint(command)} — ${command.description}`;
 }
 
 /** Каталог `/nvidia-plus` в текущей локали (описания через i18n). */
@@ -60,7 +72,7 @@ export function completeArgs(prefix: string, commands: readonly CommandSpec[]): 
   if (space === -1) {
     const items = commands
       .filter((c) => c.name.startsWith(text))
-      .map((c) => item(`${c.name} `, c.name, c.description));
+      .map((c) => item(`${c.name} `, `${c.name}${argsHint(c)}`, c.description));
     return items.length > 0 ? items : null;
   }
 
@@ -75,4 +87,21 @@ export function completeArgs(prefix: string, commands: readonly CommandSpec[]): 
     .filter((a) => a.name.startsWith(rest))
     .map((a) => item(`${name} ${a.name}`, a.name, a.description));
   return items.length > 0 ? items : null;
+}
+
+const ROOT = "nvidia-plus";
+
+/**
+ * Разбор текста редактора до курсора. Нужен, потому что Tab после пробела
+ * в TUI вызывает провайдер с `force: true`, и CombinedAutocompleteProvider
+ * тогда отдаёт файлы, минуя `getArgumentCompletions`.
+ */
+export function nvidiaPlusArgSuggestions(textBeforeCursor: string): { items: CompletionItem[]; prefix: string } | null {
+  if (!textBeforeCursor.startsWith(`/${ROOT}`)) return null;
+  const rest = textBeforeCursor.slice(1 + ROOT.length);
+  if (!rest.startsWith(" ")) return null;
+  const prefix = rest.slice(1);
+  const items = completeArgs(prefix, nvidiaPlusCommands());
+  if (!items) return null;
+  return { items, prefix };
 }
