@@ -51,11 +51,15 @@ function values(prefix: string): string[] | null {
   ]);
 }
 
-// 2. Префикс имени фильтрует первый уровень.
+// 2. Префикс имени фильтрует первый уровень; точное имя с детьми сразу
+//    раскрывает второй (Tab без пробела иначе уникально допишет `keys `
+//    и закроет выпадашку).
 {
   assert.deepEqual(values("k"), ["keys "]);
-  assert.deepEqual(values("keys"), ["keys "]);
+  assert.deepEqual(values("keys"), ["keys check", "keys on", "keys off"]);
   assert.deepEqual(values("a"), ["apply "]);
+  assert.deepEqual(values("apply"), ["apply force"]);
+  assert.deepEqual(values("status"), ["status "]);
   assert.equal(values("z"), null);
 }
 
@@ -93,7 +97,7 @@ function values(prefix: string): string[] | null {
 
 // 7. Лидирующие пробелы отбрасываются; value канонический (замена вычищает prefix).
 {
-  assert.deepEqual(values("  keys"), ["keys "]);
+  assert.deepEqual(values("  keys"), ["keys check", "keys on", "keys off"]);
   assert.deepEqual(values("  keys c"), ["keys check"]);
 }
 
@@ -125,10 +129,29 @@ function values(prefix: string): string[] | null {
 //    и CombinedAutocompleteProvider тогда отдаёт файлы, не getArgumentCompletions.
 //    nvidiaPlusArgSuggestions перехватывает `/nvidia-plus …` целиком.
 {
-  assert.equal(nvidiaPlusArgSuggestions("/nvidia-plus"), null, "имя команды — встроенному провайдеру");
   assert.equal(nvidiaPlusArgSuggestions("/nvidia-plus-keys"), null);
+  assert.equal(nvidiaPlusArgSuggestions("/nvidia-plu"), null, "неполное имя — встроенному провайдеру");
   assert.equal(nvidiaPlusArgSuggestions("/model "), null);
   assert.equal(nvidiaPlusArgSuggestions("nvidia-plus "), null);
+
+  // `/nvidia-plus` без пробела: Tab не добавляет пробел, TUI считает это
+  // дополнением имени команды (prefix со слэшем, value без ведущего `/`).
+  const noSpace = nvidiaPlusArgSuggestions("/nvidia-plus");
+  assert.equal(noSpace?.prefix, "/nvidia-plus");
+  assert.deepEqual(noSpace?.items.map((i) => i.value), [
+    "nvidia-plus apply",
+    "nvidia-plus rollback",
+    "nvidia-plus status",
+    "nvidia-plus keys",
+    "nvidia-plus discover",
+  ]);
+  assert.deepEqual(noSpace?.items.map((i) => i.label), [
+    "apply [force]",
+    "rollback",
+    "status",
+    "keys [check|on|off]",
+    "discover",
+  ]);
 
   const root = nvidiaPlusArgSuggestions("/nvidia-plus ");
   assert.equal(root?.prefix, "");
@@ -141,6 +164,10 @@ function values(prefix: string): string[] | null {
   const partial = nvidiaPlusArgSuggestions("/nvidia-plus k");
   assert.equal(partial?.prefix, "k");
   assert.deepEqual(partial?.items.map((i) => i.value), ["keys "]);
+
+  const keysExact = nvidiaPlusArgSuggestions("/nvidia-plus keys");
+  assert.equal(keysExact?.prefix, "keys");
+  assert.deepEqual(keysExact?.items.map((i) => i.value), ["keys check", "keys on", "keys off"]);
 }
 
 console.log("commands: все проверки прошли");

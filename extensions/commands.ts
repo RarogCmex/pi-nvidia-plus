@@ -70,6 +70,13 @@ export function completeArgs(prefix: string, commands: readonly CommandSpec[]): 
   const text = prefix.trimStart();
   const space = text.indexOf(" ");
   if (space === -1) {
+    if (text.length > 0) {
+      const exact = commands.find((c) => c.name === text);
+      if (exact?.args?.length) {
+        const nested = exact.args.map((a) => item(`${exact.name} ${a.name}`, a.name, a.description));
+        return nested.length > 0 ? nested : null;
+      }
+    }
     const items = commands
       .filter((c) => c.name.startsWith(text))
       .map((c) => item(`${c.name} `, `${c.name}${argsHint(c)}`, c.description));
@@ -99,6 +106,14 @@ const ROOT = "nvidia-plus";
 export function nvidiaPlusArgSuggestions(textBeforeCursor: string): { items: CompletionItem[]; prefix: string } | null {
   if (!textBeforeCursor.startsWith(`/${ROOT}`)) return null;
   const rest = textBeforeCursor.slice(1 + ROOT.length);
+  if (rest.length === 0) {
+    // Имя набрано, пробела нет: Tab идёт как дополнение команды. Value без `/`,
+    // prefix — `/nvidia-plus`; applyCompletion соберёт `/nvidia-plus apply `.
+    const items = nvidiaPlusCommands().map((c) =>
+      item(`${ROOT} ${c.name}`, `${c.name}${argsHint(c)}`, c.description),
+    );
+    return { items, prefix: `/${ROOT}` };
+  }
   if (!rest.startsWith(" ")) return null;
   const prefix = rest.slice(1);
   const items = completeArgs(prefix, nvidiaPlusCommands());
