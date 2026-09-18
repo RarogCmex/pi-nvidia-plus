@@ -101,8 +101,11 @@ const DEAD_MODELS: Record<string, string> = {
   "nvidia/nemotron-nano-12b-v2-vl": "410 EOL",
   "nvidia/nvidia-nemotron-nano-9b-v2": "410 EOL",
   "thinkingmachines/inkling": "410 EOL",
-  "deepseek-ai/deepseek-v4-flash-0731": "flapping: 200 once, then persistent 404 (2026-08-28)",
-  "nvidia/nemotron-3.5-lightning-30b-a3b": "flapping: live until 2026-08-27, persistent 404 since 2026-08-28",
+  "deepseek-ai/deepseek-v4-flash-0731": "EOL announced: deprecated 2026-09-19, unsupported after 2026-09-21 per build.nvidia.com; chat probes hang (2026-09-18)",
+  "deepseek-ai/deepseek-v4-pro-0813": "410 EOL (probe 2026-09-18)",
+  "minimaxai/minimax-m3": "410 EOL (probe 2026-09-18)",
+  "meta/muse-glimmer-30b": "404 on probe 2026-09-18 (was alive)",
+  // nvidia/nemotron-3.5-lightning-30b-a3b воскресела: 200 на пробах 2026-09-18 — убрана из мёртвых
   "google/gemma-3-4b-it": "404 in all probes",
   "google/gemma-3-12b-it": "404 in all probes",
   "mistralai/mistral-7b-instruct-v0.3": "404 in all probes",
@@ -111,6 +114,10 @@ const DEAD_MODELS: Record<string, string> = {
   "nvidia/llama-3.1-nemotron-70b-instruct": "404 in all probes (re-check ticket 08)",
   "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in all probes",
   // Вне базы пи (аудит 02; нужно для живого обнаружения — не добавлять мёртвых)
+  // Пробы 2026-09-18: наши бывшие оверрайды, померли
+  "nvidia/nemotron-3-nano-30b-a3b": "410 EOL (probe 2026-09-18)",
+  "openai/gpt-oss-120b": "410 EOL (probe 2026-09-18)",
+  "stepfun-ai/step-3.7-flash": "410 EOL (probe 2026-09-18)",
   "01-ai/yi-large": "404 in all probes (audit 02)",
   "ai21labs/jamba-1.5-large-instruct": "404 in all probes (audit 02)",
   "databricks/dbrx-instruct": "404 in all probes (audit 02)",
