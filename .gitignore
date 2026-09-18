@@ -1,2 +1,22 @@
 subprojects/
 node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local pi state (never commit keys)
+.pi/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test temp dirs
+/tmp/pi-nvidia-plus-*/

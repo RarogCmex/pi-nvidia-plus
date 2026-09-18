@@ -1,11 +1,24 @@
 {
   "name": "pi-nvidia-plus",
-  "version": "0.0.1",
-  "description": "Улучшает встроенный провайдер nvidia на месте (спайк тикета 05: хук-онли + оверрайды в формате models.json)",
+  "version": "0.1.0",
+  "description": "Pi extension that improves the built-in nvidia provider in place: thinking-level control, up-to-date model catalog, request normalization, per-provider proxy, key rotation and 429/5xx diagnostics",
   "type": "module",
-  "private": true,
+  "license": "MIT",
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi-extension",
+    "nvidia",
+    "nim",
+    "llm-provider"
+  ],
+  "engines": {
+    "node": ">=22.6"
+  },
+  "files": [
+    "extensions/",
+    "overrides/",
+    "README.md",
+    "LICENSE"
   ],
   "pi": {
     "extensions": [
@@ -16,7 +29,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "scripts": {
-    "test": "for f in test/*.test.ts; do echo \"── $f\"; node \"$f\" || exit 1; done",
+    "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc -p tsconfig.typecheck.json"
   }
 }
