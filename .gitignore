@@ -20,3 +20,6 @@ npm-debug.log*
 
 # Test temp dirs
 /tmp/pi-nvidia-plus-*/
+
+# Generated acceptance/A-B artifacts (never commit proxy/credential material)
+test-results/

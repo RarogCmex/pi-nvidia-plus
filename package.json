@@ -30,6 +30,10 @@
   },
   "scripts": {
     "test": "node scripts/run-tests.mjs",
-    "typecheck": "tsc -p tsconfig.typecheck.json"
+    "typecheck": "tsc -p tsconfig.typecheck.json",
+    "acceptance:proxy-pool": "node scripts/proxy-pool-acceptance.mjs"
+  },
+  "devDependencies": {
+    "undici": "^8.10.2"
   }
 }
