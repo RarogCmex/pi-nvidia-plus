@@ -9,6 +9,8 @@ export interface MetricsSnapshot {
   responses: Map<number, number>;
   /** Прозрачные транспортные повторы (тикет 14). */
   retries: number;
+  /** Прозрачные повторы in-band ошибки перегрузки (тикет 29). */
+  inBandRetries: number;
   /** Переключения ключей пула (тикет 15). */
   keySwitches: number;
   /** Ключи, исключённые до конца сессии (401/403). */
@@ -20,6 +22,7 @@ export interface MetricsSnapshot {
 export class SessionMetrics {
   private responses = new Map<number, number>();
   retries = 0;
+  inBandRetries = 0;
   keySwitches = 0;
   deadKeys = 0;
   cooldownWaits = 0;
@@ -32,6 +35,7 @@ export class SessionMetrics {
     return {
       responses: new Map(this.responses),
       retries: this.retries,
+      inBandRetries: this.inBandRetries,
       keySwitches: this.keySwitches,
       deadKeys: this.deadKeys,
       cooldownWaits: this.cooldownWaits,
@@ -55,6 +59,7 @@ export class SessionMetrics {
     const responses = statuses.map(([status, n]) => `${status}×${n}`);
     const groups: Array<{ kind: string; value: number }> = [];
     if (this.retries > 0) groups.push({ kind: "retries", value: this.retries });
+    if (this.inBandRetries > 0) groups.push({ kind: "inBandRetries", value: this.inBandRetries });
     if (this.keySwitches > 0) groups.push({ kind: "keySwitches", value: this.keySwitches });
     if (this.deadKeys > 0) groups.push({ kind: "deadKeys", value: this.deadKeys });
     if (this.cooldownWaits > 0) groups.push({ kind: "cooldownWaits", value: this.cooldownWaits });

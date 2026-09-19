@@ -125,6 +125,10 @@ export const MESSAGES = {
     en: "retries: {n}",
     ru: "повторов: {n}",
   },
+  metricsGroupInBandRetries: {
+    en: "overload retries: {n}",
+    ru: "повторов из-за перегрузки: {n}",
+  },
   metricsGroupKeySwitches: {
     en: "key switches: {n}",
     ru: "переключений ключа: {n}",
@@ -177,13 +181,21 @@ export const MESSAGES = {
     en: "NIM {status}: retrying transparently (attempt {attempt} of {total}, in {seconds}s)",
     ru: "NIM {status}: повторяю прозрачно (попытка {attempt} из {total}, через {seconds} с)",
   },
+  retryScheduledInBand: {
+    en: "NIM overloaded (“{reason}”): retrying transparently (attempt {attempt} of {total}, in {seconds}s)",
+    ru: "NIM перегружен («{reason}»): повторяю прозрачно (попытка {attempt} из {total}, через {seconds} с)",
+  },
+  retryInBandExhausted: {
+    en: "NIM overloaded (“{reason}”): {attempts} attempts did not help — returning the error to pi",
+    ru: "NIM перегружен («{reason}»): {attempts} попыток не помогли — отдаю ошибку пи",
+  },
   statusRetryOn: {
-    en: "transparent 429/5xx retry: on (up to {count} retries)",
-    ru: "прозрачный повтор 429/5xx: вкл (до {count} повторов)",
+    en: "transparent retry (429/5xx + in-band overload): on (up to {count} retries each)",
+    ru: "прозрачный повтор (429/5xx + in-band перегрузка): вкл (до {count} повторов каждого)",
   },
   statusRetryOff: {
-    en: "transparent 429/5xx retry: off (NVIDIA_NIM_TRANSPORT_RETRY)",
-    ru: "прозрачный повтор 429/5xx: выкл (NVIDIA_NIM_TRANSPORT_RETRY)",
+    en: "transparent retry (429/5xx + in-band overload): off (NVIDIA_NIM_TRANSPORT_RETRY)",
+    ru: "прозрачный повтор (429/5xx + in-band перегрузка): выкл (NVIDIA_NIM_TRANSPORT_RETRY)",
   },
 
   // ── Ротация ключей (тикет 15) ────────────────────────────────────────

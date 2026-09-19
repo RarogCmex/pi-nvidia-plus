@@ -27,10 +27,12 @@ assert.deepEqual(m.formatParts().groups, [
   { kind: "retries", value: 2 },
   { kind: "keySwitches", value: 1 },
 ]);
+m.inBandRetries = 4;
 m.deadKeys = 1;
 m.cooldownWaits = 3;
 assert.deepEqual(m.formatParts().groups.map((g) => g.kind), [
   "retries",
+  "inBandRetries",
   "keySwitches",
   "deadKeys",
   "cooldownWaits",

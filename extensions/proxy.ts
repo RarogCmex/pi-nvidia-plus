@@ -264,7 +264,7 @@ export class RotationController {
   }
 }
 
-function interruptibleDelay(ms: number, controller: RotationController): Promise<boolean> {
+export function interruptibleDelay(ms: number, controller: RotationController): Promise<boolean> {
   if (controller.aborted) return Promise.resolve(true);
   return new Promise((resolve) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -301,7 +301,7 @@ const ROTATABLE_STATUSES = new Set([429, 401, 403]);
    другой в диспетчерах ундичи и не принимается.
  */
 /** Позвать метод настоящего хендлера (если есть); `this` — сам хендлер. */
-function callHandlerMethod(real: Record<string, unknown> | null, name: string, ...args: unknown[]): unknown {
+export function callHandlerMethod(real: Record<string, unknown> | null, name: string, ...args: unknown[]): unknown {
   const fn = real?.[name];
   if (typeof fn !== "function") return undefined;
   return (fn as (...a: unknown[]) => unknown).apply(real, args);
@@ -749,6 +749,407 @@ export function withTransparentRetry(
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Прозрачный повтор in-band ошибки перегрузки (тикет 29)                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * NIM при перегрузке отдаёт **HTTP 200** с SSE-потоком, чьё первое событие —
+ * `data: {"error":{"message":"Service temporarily overloaded", …}}`. Итератор
+ * потока OpenAI SDK (`core/streaming.js`) видит `data.error` и бросает
+ * `APIError(undefined, …)`; пи получает `stopReason:"error"` без HTTP-статуса.
+ * Оба статус-ориентированных слоя — прозрачный повтор (`RetryAgent`, 429/5xx)
+ * и ротация ключей (`ROTATABLE_STATUSES`) — такую ошибку пропускают, и она
+ * доезжает до ретрай-пакетов, видимых моделью.
+ *
+ * Этот слой повторяет её на транспорте: первое полное событие SSE
+ * классифицируется чистой функцией `classifyInBandStream`, ответ до
+ * классификации не коммитится (приём `makeRotationAttemptHandler`).
+ *
+ * Гарантии:
+ *  - sniffing только `2xx` + `text/event-stream`; всё остальное (JSON
+ *    discovery, пробы keys-check, 4xx/5xx) стримит без задержки;
+ *  - нормальный первый чанк коммитится в том же синхронном вызове — задержка
+ *    первого токена не растёт;
+ *  - при исчерпании бюджета пи получает **исходный** ответ байт-в-байт
+ *    (та же ошибка, что и без слоя) — поведение не меняется;
+ *  - аборт ферря прерывает ожидание через стабильный контроллер.
+ */
+
+/** Потолок буфера sniffing: события-ошибки NIM крошечные, кап защищает от потоков без разделителей. */
+export const IN_BAND_SNIFF_MAX_BYTES = 8_192;
+
+/**
+ * Первая полная data-нагрузка SSE: события разделяются пустой строкой
+ * (`\r\n\r\n`, `\n\n` и смешанные формы), data-строки события склеиваются
+ * `\n`. Ведущие события без data (heartbeat-комментарии `: ping`, только
+ * `event:`-строки) пропускаются — решение принимается по первому содержательному.
+ */
+export function firstSseDataPayload(buffer: Uint8Array): string | undefined {
+  let offset = 0;
+  for (;;) {
+    const boundary = findEventBoundary(buffer, offset);
+    if (!boundary) return undefined;
+    const eventText = new TextDecoder().decode(buffer.subarray(offset, boundary.start));
+    const dataLines: string[] = [];
+    for (const line of eventText.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const value = line.startsWith("data: ") ? line.slice(6) : line.slice(5);
+      dataLines.push(value);
+    }
+    if (dataLines.length > 0) return dataLines.join("\n");
+    offset = boundary.end;
+  }
+}
+
+/** Начало и конец первого разделителя событий (пустой строки) от `offset`. */
+function findEventBoundary(buffer: Uint8Array, offset: number): { start: number; end: number } | undefined {
+  for (let i = offset; i < buffer.length; i++) {
+    if (buffer[i] !== 0x0a && buffer[i] !== 0x0d) continue;
+    // Позиция i — конец строки; за ним должна идти пустая строка.
+    const after = i + (buffer[i] === 0x0d && buffer[i + 1] === 0x0a ? 2 : 1);
+    if (after >= buffer.length) return undefined;
+    if (buffer[after] === 0x0a) return { start: i, end: after + 1 };
+    if (buffer[after] === 0x0d && buffer[after + 1] === 0x0a) return { start: i, end: after + 2 };
+  }
+  return undefined;
+}
+
+/**
+ * Объект ошибки из полезной нагрузки. Формы NIM/OpenAI-совместимых шлюзов:
+ * `{error:{message}}`, `{error:"строка"}`, плоская `{message|detail|title|status}`.
+ * Обычный чанк генерации (`{id,object,created,model,choices,…}`) ошибкой не
+ * считается — поэтому у плоской формы разрешены только «ошибочные» ключи.
+ */
+export function extractErrorObject(data: string): Record<string, unknown> | undefined {
+  if (!data.startsWith("{")) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const root = parsed as Record<string, unknown>;
+  const nested = root.error;
+  if (nested && typeof nested === "object") return nested as Record<string, unknown>;
+  if (typeof nested === "string" && nested.trim().length > 0) return { message: nested };
+  const ERROR_ONLY_KEYS = ["message", "detail", "error", "status", "title", "type", "code"];
+  const keys = Object.keys(root);
+  if (keys.length > 0 && keys.every((k) => ERROR_ONLY_KEYS.includes(k))) return root;
+  return undefined;
+}
+
+/** Человекочитаемый текст ошибки: message → detail → error → title → JSON. */
+export function inBandErrorMessage(errorObj: Record<string, unknown>): string {
+  for (const key of ["message", "detail", "error", "title"]) {
+    const value = errorObj[key];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  try {
+    return JSON.stringify(errorObj);
+  } catch {
+    return String(errorObj);
+  }
+}
+
+/**
+ * Транзитные тексты — пересечение с ретрай-каталогом pi-ai (`overloaded`,
+ * `rate limit`, 429/5xx, `ResourceExhausted`, …) плюс NIM-формулировки.
+ * Нетранзитные проверяются ПЕРВЫМИ и всегда побеждают: `quota exceeded`
+ * даёт 429, но повтор её не лечит (каталог NON_RETRYABLE pi-ai).
+ */
+const IN_BAND_NON_RETRYABLE_RE =
+  /content.?filter|invalid|unauthoriz|forbidden|permission|denied|authenticat|api.?key|insufficient.?quota|out of budget|quota exceeded|billing|context.?(length|window)|exceeds.{0,20}context|too long|bad request|malformed|unsupported|not.?(found|supported)|deprecated|moderation/i;
+const IN_BAND_RETRYABLE_RE =
+  /overload|temporaril|rate.?limit|too many requests|retry|try again|try your request|later|unavailable|capacity|resource.?exhausted|server.?error|internal.?error|bad.?gateway|gateway.?time|timed?.?out|timeout|upstream|\b429\b|\b50[0234]\b|\b524\b/i;
+
+export type InBandDecision =
+  | { kind: "undecided" }
+  | { kind: "retry"; reason: string }
+  | { kind: "deliver"; reason: string };
+
+/**
+ * Классификация начала ответа. `undecided` — первое событие ещё не получено
+ * целиком; переполнение капа → `deliver` (это не крошечное событие-ошибка,
+ * ждать дальше бессмысленно). Чистая функция — ядро юнит-тестов.
+ */
+export function classifyInBandStream(
+  status: number,
+  contentType: string | undefined,
+  buffer: Uint8Array,
+  maxBytes: number = IN_BAND_SNIFF_MAX_BYTES,
+): InBandDecision {
+  if (status < 200 || status >= 300) return { kind: "deliver", reason: "status" };
+  if (!/text\/event-stream/i.test(contentType ?? "")) return { kind: "deliver", reason: "not-sse" };
+  if (buffer.length > maxBytes) return { kind: "deliver", reason: "buffer-cap" };
+  const first = firstSseDataPayload(buffer);
+  if (first === undefined) return { kind: "undecided" };
+  if (first.startsWith("[DONE]")) return { kind: "deliver", reason: "done" };
+  const errorObj = extractErrorObject(first);
+  if (!errorObj) return { kind: "deliver", reason: "no-error" };
+  const message = inBandErrorMessage(errorObj);
+  if (IN_BAND_NON_RETRYABLE_RE.test(message)) return { kind: "deliver", reason: "non-retryable" };
+  if (IN_BAND_RETRYABLE_RE.test(message)) return { kind: "retry", reason: message };
+  // Нераспознанная форма ошибки — не маскируем: пи должен её увидеть.
+  return { kind: "deliver", reason: "unclassified" };
+}
+
+/** Задержка повтора: плоский `minDelayMs` с удвоением на попытку, кап `maxDelayMs`. */
+export function inBandRetryDelayMs(attempt: number, config: { minDelayMs: number; maxDelayMs: number }): number {
+  const expo = config.minDelayMs * 2 ** Math.max(0, attempt - 1);
+  return Math.min(expo, config.maxDelayMs);
+}
+
+/** Буферизованный ответ одной попытки: заголовки хранятся как пришли — отдаются без изменений. */
+export interface BufferedInBandResponse {
+  status: number;
+  headers: unknown;
+  contentType: string | undefined;
+  statusMessage: unknown;
+  chunks: Uint8Array[];
+  trailers: unknown;
+}
+
+type InBandAttemptOutcome =
+  | { type: "delivered" }
+  | { type: "retry"; reason: string }
+  | { type: "error"; error: unknown };
+
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const chunk of chunks) total += chunk.length;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+/**
+ * Хендлер одной попытки: SSE-2xx не коммитится сразу — первое событие
+ * буферизуется и классифицируется, остальное стримит в настоящий хендлер без
+ * задержки. Поток на паузу не ставится: решение принимается по мере прихода
+ * чанков, а отказ NIM после события-ошибки терминальный (приём тот же, что в
+ * `makeRotationAttemptHandler`).
+ *
+ * Исчерпание бюджета — не отдельный исход: ответ коммитится как есть и
+ * доходит до пи байт-в-байт вместе с естественным `onResponseEnd`, то есть
+ * поведение совпадает с вариантом «слоя нет вовсе». Факт исчерпания уходит
+ * наружу колбэком `onExhausted` — только для уведомления и метрик.
+ */
+function makeInBandAttemptHandler(
+  real: Record<string, unknown> | null,
+  controller: RotationController,
+  settle: (outcome: InBandAttemptOutcome) => void,
+  options: { canRetry: boolean; onExhausted?: (reason: string) => void },
+): Record<string, unknown> {
+  let mode: "pending" | "sniffing" | "streaming" = "pending";
+  let buffered: BufferedInBandResponse | undefined;
+  let settled = false;
+  // `onResponseStarted` приходит до `onResponseStart` (тайминги ферря): держим
+  // флаг, чтобы при отложенном коммите соблюсти порядок вызовов.
+  let startedSeen = false;
+  const finish = (outcome: InBandAttemptOutcome): void => {
+    if (settled) return;
+    settled = true;
+    settle(outcome);
+  };
+  const call = (name: string, ...args: unknown[]): unknown => callHandlerMethod(real, name, ...args);
+
+  /** Отдать всё накопленное настоящему хендлеру и перейти в сквозной стрим. */
+  const commit = (): void => {
+    if (!buffered) return;
+    mode = "streaming";
+    finish({ type: "delivered" });
+    if (startedSeen) call("onResponseStarted");
+    startedSeen = false;
+    call("onResponseStart", controller, buffered.status, buffered.headers, buffered.statusMessage);
+    for (const chunk of buffered.chunks) call("onResponseData", controller, chunk);
+    buffered = undefined;
+  };
+
+  const decide = (final: boolean): boolean => {
+    if (!buffered) return false;
+    const joined = concatChunks(buffered.chunks);
+    const decision = classifyInBandStream(buffered.status, buffered.contentType, joined);
+    if (decision.kind === "undecided") {
+      // Поток закончился раньше классификации — отдаём, что есть.
+      if (final) return commit(), true;
+      return false;
+    }
+    if (decision.kind === "retry" && options.canRetry) {
+      // Ответ выброшен, настоящему хендлеру ничего не отдано — можно повторять.
+      finish({ type: "retry", reason: decision.reason });
+      mode = "pending";
+      buffered = undefined; // хвостовые чанки покинутого ответа не собираем
+      return false;
+    }
+    if (decision.kind === "retry") options.onExhausted?.(decision.reason);
+    commit();
+    return true;
+  };
+
+  return {
+    onRequestStart(conn: unknown, context: unknown) {
+      controller.target = conn as never;
+      if (!controller.forwardedStart && typeof real?.onRequestStart === "function") {
+        controller.forwardedStart = true;
+        call("onRequestStart", controller, context);
+      }
+    },
+    onResponseStarted() {
+      startedSeen = true;
+      if (mode === "streaming") {
+        startedSeen = false;
+        call("onResponseStarted");
+      }
+      // в sniffing не зовём: ответ может быть выброшен при повторе
+    },
+    onResponseStart(conn: unknown, status: number, headers: unknown, statusMessage: unknown) {
+      controller.target = conn as never;
+      const record = headersToRecord(headers);
+      const contentType = record["content-type"];
+      // Пустой буфер: `undecided` только для SSE-2xx, всё остальное — сразу стрим.
+      if (classifyInBandStream(status, contentType, new Uint8Array(0)).kind === "deliver") {
+        mode = "streaming";
+        finish({ type: "delivered" });
+        if (startedSeen) {
+          startedSeen = false;
+          call("onResponseStarted");
+        }
+        call("onResponseStart", controller, status, headers, statusMessage);
+        return;
+      }
+      mode = "sniffing";
+      buffered = { status, headers, contentType, statusMessage, chunks: [], trailers: undefined };
+    },
+    onResponseData(_conn: unknown, chunk: unknown) {
+      if (mode === "streaming") return call("onResponseData", controller, chunk);
+      if (mode === "sniffing" && buffered) {
+        const bytes = chunk instanceof Uint8Array ? chunk : new TextEncoder().encode(String(chunk));
+        buffered.chunks.push(bytes);
+        decide(false);
+      }
+      return undefined;
+    },
+    onResponseEnd(trailers: unknown) {
+      if (mode === "streaming") return call("onResponseEnd", controller, trailers);
+      if (mode === "sniffing" && buffered) {
+        buffered.trailers = trailers;
+        if (decide(true)) call("onResponseEnd", controller, trailers);
+      }
+      return undefined;
+    },
+    onResponseError(conn: unknown, err: unknown) {
+      if (conn) controller.target = conn as never;
+      if (mode === "streaming") {
+        call("onResponseError", controller, err);
+        return;
+      }
+      finish({ type: "error", error: err });
+    },
+    onRequestUpgrade(conn: unknown, status: number, headers: unknown, socket: unknown) {
+      controller.target = conn as never;
+      mode = "streaming";
+      finish({ type: "delivered" });
+      return call("onRequestUpgrade", controller, status, headers, socket);
+    },
+  };
+}
+
+export interface InBandRetryConfig {
+  /** Повторы сверх первой попытки. */
+  maxRetries: number;
+  /** Стартовая задержка отката, мс (удваивается на попытку). */
+  minDelayMs: number;
+  /** Потолок задержки, мс. */
+  maxDelayMs: number;
+  /** Запланирован повтор (`attempt` — от 1, `reason` — текст ошибки NIM). */
+  onRetryScheduled?: (info: { attempt: number; reason: string; delayMs: number }) => void;
+  /** Бюджет исчерпан — пи получит исходную ошибку (уведомление/метрика). */
+  onExhausted?: (info: { attempts: number; reason: string }) => void;
+}
+
+async function runInBandLoop(
+  target: DispatchTarget,
+  opts: Record<string, unknown>,
+  body: unknown,
+  real: Record<string, unknown> | null,
+  config: InBandRetryConfig,
+): Promise<void> {
+  const controller = new RotationController();
+
+  // Аборт ферря: тот же приём, что в ротации — сигнал + стабильный контроллер,
+  // чтобы ожидание между попытками прерывалось по Esc.
+  const signal = opts.signal as
+    | { aborted?: unknown; addEventListener?: unknown; reason?: unknown; removeEventListener?: unknown }
+    | undefined;
+  let removeSignalListener: (() => void) | undefined;
+  if (signal && typeof signal.addEventListener === "function" && typeof signal.aborted === "boolean") {
+    if (signal.aborted) controller.abort(signal.reason);
+    else {
+      const onAbort = () => controller.abort(signal.reason);
+      (signal.addEventListener as (t: string, l: () => void, o?: unknown) => void)("abort", onAbort, { once: true });
+      removeSignalListener = () => (signal.removeEventListener as (t: string, l: () => void) => void)("abort", onAbort);
+    }
+  }
+
+  try {
+    for (let attempt = 0; ; attempt++) {
+      if (controller.aborted) return;
+      const canRetry = attempt < config.maxRetries;
+      const outcome = await new Promise<InBandAttemptOutcome>((resolve) => {
+        const handler = makeInBandAttemptHandler(real, controller, resolve, {
+          canRetry,
+          onExhausted: (reason) => config.onExhausted?.({ attempts: attempt + 1, reason }),
+        });
+        try {
+          target.dispatch({ ...opts, body }, handler);
+        } catch (err) {
+          resolve({ type: "error", error: err });
+        }
+      });
+      if (controller.aborted) return;
+      if (outcome.type === "delivered") return;
+      if (outcome.type === "error") {
+        deliverHandlerError(real, controller, outcome.error);
+        return;
+      }
+      const delayMs = inBandRetryDelayMs(attempt + 1, config);
+      config.onRetryScheduled?.({ attempt: attempt + 1, reason: outcome.reason, delayMs });
+      const aborted = await interruptibleDelay(delayMs, controller);
+      if (aborted || controller.aborted) return;
+    }
+  } finally {
+    removeSignalListener?.();
+  }
+}
+
+/**
+ * Цель-диспетчер с прозрачным повтором in-band перегрузки. Ставится самым
+ * внутренним (над `base`): каждый повтор — свежий запрос в сеть, а статусные
+ * слои выше видят один логический запрос и его конечный исход. Тело
+ * буферизуется один раз и переиспользуется на всех попытках.
+ */
+export function withInBandOverloadRetry(target: DispatchTarget, config: InBandRetryConfig): SelectiveDispatcherHandle {
+  return {
+    dispatch(opts: unknown, handler: unknown): boolean {
+      const real = (handler && typeof handler === "object" ? handler : null) as Record<string, unknown> | null;
+      const record = (opts ?? {}) as Record<string, unknown>;
+      bufferRequestBody(record.body)
+        .then((body) => runInBandLoop(target, record, body, real, config))
+        .catch((err) => {
+          deliverHandlerError(real, new RotationController(), err);
+        });
+      return true;
+    },
+    ...forwardLifecycle(target),
+  };
+}
+
 export interface SelectiveDispatcherOptions {
   /** Куда идут запросы к NIM (обычно `undici.ProxyAgent`). */
   nvidia: DispatchTarget;
@@ -912,6 +1313,8 @@ export interface InstallOptions {
   onProxyError?: (message: string, cause: unknown) => void;
   /** Включает прозрачный транспортный повтор 429/5xx (нужен `deps.createRetryAgent`). */
   retry?: TransportRetryConfig;
+  /** Прозрачный повтор in-band ошибки перегрузки (тикет 29): самый внутренний слой над `base`. */
+  inBandRetry?: InBandRetryConfig;
   /** Включает ротацию ключей NIM (тикет 15); ставится поверх повтора. */
   rotation?: RotationLayerOptions;
 }
@@ -947,11 +1350,14 @@ export function ensureDispatcherInstalled(deps: DispatcherDeps, options: Install
   const base: DispatchTarget = options.proxyUrl
     ? deps.createProxyAgent(options.proxyUrl)
     : (current as DispatchTarget);
+  // In-band повтор перегрузки (тикет 29) — самый внутренний: HTTP 200 с
+  // `data: {"error": …}` в SSE не видит ни RetryAgent, ни ротация (оба по статусу).
+  const inBanded = options.inBandRetry ? withInBandOverloadRetry(base, options.inBandRetry) : base;
   // Прозрачный повтор 429/5xx: наблюдатель выше повторителя и видит только конечный исход.
   const retried =
     options.retry && deps.createRetryAgent
-      ? withTransparentRetry(base, options.retry, { createRetryAgent: deps.createRetryAgent })
-      : base;
+      ? withTransparentRetry(inBanded, options.retry, { createRetryAgent: deps.createRetryAgent })
+      : inBanded;
   // Ротация ключей — поверх повтора: на каждый ключ сначала бюджет повторов, потом смена.
   const nvidiaTarget = options.rotation ? withKeyRotation(retried, options.rotation) : retried;
   const duck = createSelectiveDispatcher({

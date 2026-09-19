@@ -74,6 +74,7 @@ function metricsSummary(): string {
   const { responses, groups } = metrics.formatParts();
   const groupLabels: Record<string, string> = {
     retries: t("metricsGroupRetries", { n: metrics.retries }),
+    inBandRetries: t("metricsGroupInBandRetries", { n: metrics.inBandRetries }),
     keySwitches: t("metricsGroupKeySwitches", { n: metrics.keySwitches }),
     deadKeys: t("metricsGroupDeadKeys", { n: metrics.deadKeys }),
     cooldownWaits: t("metricsGroupCooldownWaits", { n: metrics.cooldownWaits }),
@@ -189,6 +190,11 @@ let suppressedSwitchCount = 0;
 // Темп (живое замечание тикета 15): 4 попытки на ключ с плоской задержкой 2 с —
 // живой NIM заголовки в 429 не даёт, а рейт-лимит на аккаунт плавает.
 const TRANSPORT_RETRY = { maxRetries: 3, minDelayMs: 2_000, maxDelayMs: 30_000 } as const;
+// Прозрачный повтор in-band перегрузки (тикет 29): NIM отдаёт HTTP 200 с SSE-
+// событием `{"error":{"message":"Service temporarily overloaded"}}` — статусные
+// слои её не видят, а пи-ретрай делает ошибку видимой модели. Откат чуть
+// длиннее статусного: перегрузка сервиса рассасывается медленнее бакета ключа.
+const IN_BAND_RETRY = { maxRetries: 3, minDelayMs: 5_000, maxDelayMs: 30_000 } as const;
 function transportRetryEnabled(): boolean {
   const raw = process.env.NVIDIA_NIM_TRANSPORT_RETRY?.trim().toLowerCase();
   return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
@@ -466,6 +472,34 @@ function ensureTransportInstalled(): void {
                   seconds,
                 }),
                 "info",
+              );
+            },
+          }
+        : undefined,
+      // In-band перегрузка (тикет 29): тот же выключатель — это тоже прозрачный
+      // транспортный повтор, просто срабатывает на содержимое SSE, а не на статус.
+      inBandRetry: transportRetryEnabled()
+        ? {
+            ...IN_BAND_RETRY,
+            onRetryScheduled: (info) => {
+              metrics.inBandRetries++;
+              debug("nvidia-inband-retry", `«${info.reason}», повтор ${info.attempt}, задержка ${info.delayMs} мс`, info);
+              const seconds = Math.max(1, Math.round(info.delayMs / 1000));
+              proxyState.notify?.(
+                t("retryScheduledInBand", {
+                  reason: info.reason,
+                  attempt: info.attempt,
+                  total: IN_BAND_RETRY.maxRetries + 1,
+                  seconds,
+                }),
+                "info",
+              );
+            },
+            onExhausted: (info) => {
+              debug("nvidia-inband-exhausted", `«${info.reason}», ${info.attempts} попыток`, info);
+              proxyState.notify?.(
+                t("retryInBandExhausted", { reason: info.reason, attempts: info.attempts }),
+                "warning",
               );
             },
           }

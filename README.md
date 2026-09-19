@@ -16,6 +16,7 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
 3. **Request normalization (P2).** Text content-arrays are flattened to strings for older models; a default `max_tokens` is set when the model requires it.
 4. **Per-provider proxy (P3).** `NVIDIA_NIM_PROXY` routes only `https://integrate.api.nvidia.com` through your proxy; other providers are untouched.
 5. **Diagnostics (P4).** `retry-after` and request IDs for 429/5xx are surfaced during pi's retry pauses.
+6. **Transparent in-band retry (P4).** NIM sometimes answers an overloaded request with **HTTP 200** whose SSE stream carries `data: {"error":{"message":"Service temporarily overloaded"}}`. Both status-keyed layers (transport 429/5xx retry, key rotation) miss it, so it surfaces as a `stopReason: error` turn that pi-retry makes visible to the model. The extension sniffs the first SSE event and transparently re-issues the request (3 attempts, backoff), so pi and the model never see it. On exhaustion pi gets the original error unchanged. Toggle with `NVIDIA_NIM_TRANSPORT_RETRY`.
 
 ## Installation
 
@@ -60,7 +61,7 @@ Tab-completion covers subcommands and their arguments.
 | `NVIDIA_NIM_KEYS_FILE` | Path to `{"keys": ["nvapi-…"]}` pool file. Default: `~/.pi/agent/nvidia-keys.json`. Values support `$VAR` / `${VAR}` interpolation. |
 | `NVIDIA_NIM_KEY_ROTATION` | `0`/`false`/`no`/`off` disables rotation. Default: enabled when a pool is configured. |
 | `NVIDIA_NIM_SHARED_ROTATION` | `0` disables cross-process shared state (`~/.pi/agent/nvidia-keys-state.json`). Default: enabled. |
-| `NVIDIA_NIM_TRANSPORT_RETRY` | `0` disables transparent 429/5xx retries. Default: enabled (3 retries). |
+| `NVIDIA_NIM_TRANSPORT_RETRY` | `0` disables transparent retries — both 429/5xx **and** in-band `Service temporarily overloaded` (HTTP 200 + SSE error event). Default: enabled (3 retries each). |
 | `PI_NVIDIA_PLUS_DEBUG` | `1` writes final payloads to `~/.pi/nvidia-plus-debug.log`. |
 | `PI_NVIDIA_PLUS_LANG` | `ru` or `en`. Overrides `LC_ALL` / `LC_MESSAGES` / `LANG` detection. |
 
