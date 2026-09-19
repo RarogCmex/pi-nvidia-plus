@@ -17,6 +17,8 @@ export interface MetricsSnapshot {
   deadKeys: number;
   /** Ожидания отката кулдауна (все ключи в кулдауне). */
   cooldownWaits: number;
+  /** Смены pin прокси между последовательными nvidia-dispatch (spec proxy-pool). */
+  proxySwitches: number;
 }
 
 export class SessionMetrics {
@@ -26,6 +28,7 @@ export class SessionMetrics {
   keySwitches = 0;
   deadKeys = 0;
   cooldownWaits = 0;
+  proxySwitches = 0;
 
   noteResponse(status: number): void {
     this.responses.set(status, (this.responses.get(status) ?? 0) + 1);
@@ -39,6 +42,7 @@ export class SessionMetrics {
       keySwitches: this.keySwitches,
       deadKeys: this.deadKeys,
       cooldownWaits: this.cooldownWaits,
+      proxySwitches: this.proxySwitches,
     };
   }
 
@@ -63,6 +67,7 @@ export class SessionMetrics {
     if (this.keySwitches > 0) groups.push({ kind: "keySwitches", value: this.keySwitches });
     if (this.deadKeys > 0) groups.push({ kind: "deadKeys", value: this.deadKeys });
     if (this.cooldownWaits > 0) groups.push({ kind: "cooldownWaits", value: this.cooldownWaits });
+    if (this.proxySwitches > 0) groups.push({ kind: "proxySwitches", value: this.proxySwitches });
     return { responses, groups };
   }
 }

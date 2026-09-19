@@ -13,6 +13,14 @@
  */
 import { KeyRotator, maskKey, type RotationRequest } from "./keys.ts";
 import { t } from "./i18n.ts";
+import {
+  PROXY_QUARANTINE_MS,
+  isConnectClassError,
+  maskProxy,
+  redactProxyCredentials,
+  type ProxyPick,
+  type ProxyRotator,
+} from "./proxy-pool.ts";
 
 export const NVIDIA_ORIGIN = "https://integrate.api.nvidia.com";
 
@@ -21,16 +29,29 @@ export interface ParsedProxy {
   error?: string;
 }
 
-/** Разбор `NVIDIA_NIM_PROXY`. Без схемы подразумевается `http://`. */
+/**
+ * Разбор `NVIDIA_NIM_PROXY` (легаси-одиночка). Без схемы подразумевается
+ * `http://`; схемы кроме http/https отклоняются (story 40: socks у HTTP-only
+ * ProxyAgent ундичи дал бы загадочный CONNECT-провал — лучше ошибка разбора,
+ * называющая переменную, как в тикете 18).
+ */
 export function parseProxyUrl(raw: string | undefined): ParsedProxy {
   const value = raw?.trim();
   if (!value) return {};
   const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `http://${value}`;
+  // Значение может нести userinfo (пароль прокси) — в сообщении об ошибке
+  // показываем только redacted-форму (story 39: креденшелы не покидают шов).
+  const shown = redactProxyCredentials(value);
+  let url: URL;
   try {
-    return { url: new URL(candidate) };
+    url = new URL(candidate);
   } catch {
-    return { error: t("proxyParseError", { value }) };
+    return { error: t("proxyParseError", { value: shown }) };
   }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { error: t("proxyLegacySchemeError", { scheme: url.protocol.replace(/:$/, ""), value: shown }) };
+  }
+  return { url };
 }
 
 /** Маршрутизация только точного начала `https://integrate.api.nvidia.com`. */
@@ -115,21 +136,15 @@ export function formatDiagnostic(d: NimDiagnostic): string {
   return t("diagServerError", { status: d.status, retry, request });
 }
 
-const PROXY_CONNECT_CODES = new Set([
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "ETIMEDOUT",
-  "EPIPE",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_SOCKET",
-]);
-
+/**
+ * CONNECT-класс ошибок прокси. Делегирует единому классификатору шва пула
+ * (включая EHOSTUNREACH/ENETUNREACH свежего коннекта — симптом из A/B
+ * тикета 30 — и разворачивание `cause`/AggregateError): кольцо и `proxy
+ * check` обязаны карантинить один и тот же класс, иначе проба наказывает
+ * выход, который живой dispatch счёл бы рабочим (и наоборот).
+ */
 export function isProxyConnectError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const code = (err as NodeJS.ErrnoException).code;
-  return typeof code === "string" && PROXY_CONNECT_CODES.has(code);
+  return isConnectClassError(err);
 }
 
 /** Понятная ошибка при недоступном прокси. */
@@ -137,6 +152,17 @@ export function describeProxyFailure(proxyUrl: string, cause: unknown): string {
   const code = (cause as NodeJS.ErrnoException | undefined)?.code;
   const detail = code ?? (cause instanceof Error ? cause.message : String(cause));
   return t("proxyUnreachable", { url: proxyUrl, detail });
+}
+
+/**
+ * Понятная ошибка при недоступном эндпоинте пула: именует display identity
+ * (`host:port`), никогда credentialed URL — иначе ротация пароля утекла бы в
+ * уведомление/лог (story 39). `detail` — код соединения.
+ */
+export function describeEndpointFailure(display: string, cause: unknown): string {
+  const code = (cause as NodeJS.ErrnoException | undefined)?.code;
+  const detail = code ?? (cause instanceof Error ? cause.message : String(cause));
+  return t("proxyEndpointUnreachable", { url: display, detail });
 }
 
 export interface DispatchTarget {
@@ -1150,6 +1176,263 @@ export function withInBandOverloadRetry(target: DispatchTarget, config: InBandRe
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Кольцо прокси: pin-инвариант (spec proxy-pool, фаза 1)                 */
+/* ------------------------------------------------------------------ */
+
+export interface ProxyRingOptions {
+  /** Сессионное состояние выбора выхода. */
+  rotator: ProxyRotator;
+  /** Пул нормализованных href (без паролей в отчётах); зовётся на каждый dispatch — горячая перезагрузка. */
+  getPoolHrefs(): string[];
+  /** Аварийный выключатель кольца (окружение + команда живой сессии). */
+  rotationEnabled(): boolean;
+  /** Opt-in direct: пул ПУСТ (не «все в cooldown») и флаг on — маршрут без прокси. */
+  directFallbackEnabled(): boolean;
+  /** Создание bare-агента эндпоинта (входная точка передаёт `undici.ProxyAgent`). */
+  createBareAgent(href: string): DispatchTarget;
+  /** Сборка внутреннего лука поверх bare-агента (in-band → повтор → ротация ключей). */
+  stackInnerLayers(bare: DispatchTarget): DispatchTarget;
+  /** Закрытие агента выбывшего из пула href. */
+  closeAgent?(href: string, agent: DispatchTarget): void;
+  /** Pin сменился между dispatch (метрика сессии; display identity). */
+  onPinSwitch?(info: { from?: string; to: string }): void;
+  /** CONNECT-ошибка → карантин (уведомление; display identity + готовое сообщение). */
+  onQuarantine?(info: { display: string; cooldownMs: number; detail: string; message: string }): void;
+  /** Пустой пул: `allowed` — маршрут ушёл в direct (флаг on); иначе запрос остановлен (story 35: без флага origin IP не светим). */
+  onDirectFallback?(allowed: boolean): void;
+  now?: () => number;
+}
+
+interface RingEntry {
+  bare: DispatchTarget;
+  stacked: DispatchTarget;
+}
+
+/**
+ * Цель-диспетчер с кольцом прокси: pick ОДИН раз на входящий dispatch и на
+ * весь внутренний круг ключей/прозрачных повторов этого запроса (pin-
+ * инвариант спеки). На каждый href лениво создаётся bare-агент и оборачивается
+ * общим луком (все onion-ы разделяют ОДИН key-ротатор — его инжектирует
+ * `stackInnerLayers`). Внутризапросный CONNECT-failover — фаза 2, здесь его
+ * нет: начавшийся на pin запрос завершается на нём же, даже если CONNECT умирает.
+ *
+ * Пустой пул: с флагом `directFallbackEnabled` маршрут уходит прежнему
+ * глобальному диспетчеру (осознанный «try anyway»); БЕЗ флага запрос
+ * останавливается понятной ошибкой — молча светить origin IP на
+ * ограниченной сети нельзя (story 35). Все эндпоинты в cooldown — НЕ повод
+ * для direct: pick возвращает ближайший expiry (правило 4).
+ */
+export function withProxyRing(base: DispatchTarget, options: ProxyRingOptions): SelectiveDispatcherHandle {
+  const entries = new Map<string, RingEntry>();
+  let lastPinDisplay: string | undefined;
+
+  const entryFor = (href: string): RingEntry => {
+    let entry = entries.get(href);
+    if (!entry) {
+      const bare = options.createBareAgent(href);
+      entry = { bare, stacked: options.stackInnerLayers(bare) };
+      entries.set(href, entry);
+    }
+    return entry;
+  };
+
+  const reconcile = (pool: string[]): void => {
+    if (entries.size === 0) return;
+    const poolSet = new Set(pool);
+    for (const [href, entry] of [...entries]) {
+      if (poolSet.has(href)) continue;
+      entries.delete(href);
+      try {
+        if (options.closeAgent) options.closeAgent(href, entry.bare);
+        else void (entry.bare as { destroy?: () => Promise<void> }).destroy?.();
+      } catch {
+        // закрытие keep-alive пула — best effort
+      }
+    }
+  };
+
+  return {
+    dispatch(opts: unknown, handler: unknown): boolean {
+      let pick: ProxyPick;
+      let href: string | undefined;
+      try {
+        const pool = options.getPoolHrefs();
+        options.rotator.setPool(pool);
+        reconcile(pool);
+        pick = options.rotator.pick((options.now ?? Date.now)(), {
+          rotationEnabled: options.rotationEnabled(),
+        });
+        if (pick.kind === "proxy") href = pick.href;
+      } catch {
+        pick = { kind: "direct" }; // подготовка не должна ломать запрос
+      }
+      if (pick.kind !== "proxy" || !href) {
+        // Пустой пул: direct только с явным флагом; иначе — понятная ошибка
+        // без обращения в сеть (origin IP не покидает машину).
+        const allowed = options.directFallbackEnabled();
+        options.onDirectFallback?.(allowed);
+        if (allowed) return base.dispatch(opts, handler);
+        deliverRingBlocked(handler);
+        return true;
+      }
+
+      const display = maskProxy(href);
+      if (lastPinDisplay !== undefined && lastPinDisplay !== display) {
+        options.onPinSwitch?.({ from: lastPinDisplay, to: display });
+      }
+      lastPinDisplay = display;
+
+      const entry = entryFor(href);
+      // Наблюдение исхода: CONNECT-класс → карантин + переписывание ошибки в
+      // понятную (display identity); успех → markOk (снимает карантин, пишет
+      // exit quality). 429/401/403/5xx/in-band — НЕ прокси: их обрабатывают
+      // внутренние слои (ротация ключей, транспортный повтор). Abort (Esc) —
+      // тоже исход: занятость освобождается, карантин не ставится.
+      const startedAt = (options.now ?? Date.now)();
+      let settled = false;
+      let removeAbortListener: (() => void) | undefined;
+      const settle = (): boolean => {
+        if (settled) return false;
+        settled = true;
+        options.rotator.releaseInFlight(href!);
+        removeAbortListener?.();
+        return true;
+      };
+      const wrapped = wrapRingHandler(handler, href, display, options, startedAt, settle);
+      options.rotator.noteInFlight(href);
+      removeAbortListener = hookAbortRelease((opts as { signal?: unknown } | null)?.signal, settle);
+      try {
+        return entry.stacked.dispatch(opts, wrapped);
+      } catch (err) {
+        // Синхронный провал dispatch: отдаём ошибку хендлеру как CONNECT-исход.
+        settle();
+        deliverRingError(handler, href, display, err, options);
+        return true;
+      }
+    },
+    close(): Promise<void> {
+      const jobs: Array<Promise<void> | undefined> = [Promise.resolve((base as { close?: () => Promise<void> }).close?.())];
+      for (const entry of entries.values()) jobs.push(Promise.resolve((entry.bare as { close?: () => Promise<void> }).close?.()));
+      return Promise.all(jobs).then(() => undefined);
+    },
+    destroy(): Promise<void> {
+      const jobs: Array<Promise<void> | undefined> = [Promise.resolve((base as { destroy?: () => Promise<void> }).destroy?.())];
+      for (const entry of entries.values()) jobs.push(Promise.resolve((entry.bare as { destroy?: () => Promise<void> }).destroy?.()));
+      return Promise.all(jobs).then(() => undefined);
+    },
+    /** Агент эндпоинта (для `proxy check` и `getNvidiaDirectDispatcher`). */
+    __ringAgentFor(href: string): DispatchTarget {
+      return entryFor(href).bare;
+    },
+  } as SelectiveDispatcherHandle & { __ringAgentFor(href: string): DispatchTarget };
+}
+
+/**
+ * Обёртка хендлера кольца: наблюдает конечный исход ОДНОЙ попытки на pin
+ * (внутренние слои уже отработали свои повторы). Только новый протокол
+ * (ундичи 7+) — его использует fetch пи; старый протокол проходит насквозь
+ * (наблюдения не будет — как сегодня на редких транспортах).
+ */
+function wrapRingHandler(
+  handler: unknown,
+  href: string,
+  display: string,
+  options: ProxyRingOptions,
+  startedAt: number,
+  settle: () => boolean,
+): unknown {
+  if (!handler || typeof handler !== "object") return handler;
+  const h = handler as Record<string, unknown>;
+  if (typeof h.onResponseStart !== "function" && typeof h.onResponseError !== "function") return handler;
+  if (ringWrappedHandlers.has(h)) return handler;
+
+  if (typeof h.onResponseStart === "function") {
+    const original = h.onResponseStart as (...args: unknown[]) => unknown;
+    h.onResponseStart = function (controller: unknown, status: number, headers: unknown, statusMessage: unknown) {
+      if (settle()) {
+        // Любой HTTP-статус — выход достижим (exit quality); 429/5xx — бакеты
+        // ключа/транспорта, прокси они не трогают.
+        const latencyMs = Math.max(0, ((options.now ?? Date.now)()) - startedAt);
+        options.rotator.markOk(href, latencyMs);
+      }
+      return original.call(this, controller, status, headers, statusMessage);
+    };
+  }
+  if (typeof h.onResponseError === "function") {
+    const original = h.onResponseError as (...args: unknown[]) => unknown;
+    h.onResponseError = function (controller: unknown, err: unknown) {
+      if (settle()) {
+        const rewritten = noteRingError(href, display, err, options);
+        return original.call(this, controller, rewritten);
+      }
+      return original.call(this, controller, err);
+    };
+  }
+  ringWrappedHandlers.add(h);
+  return h;
+}
+
+const ringWrappedHandlers = new WeakSet<object>();
+
+/** Аборт ферря (Esc) — исход запроса: освобождаем занятость без карантина. */
+function hookAbortRelease(signal: unknown, settle: () => boolean): (() => void) | undefined {
+  const s = signal as { aborted?: unknown; addEventListener?: unknown; removeEventListener?: unknown } | undefined;
+  if (!s || typeof s.addEventListener !== "function" || typeof s.aborted !== "boolean") return undefined;
+  if (s.aborted) {
+    settle();
+    return undefined;
+  }
+  const onAbort = (): void => {
+    settle();
+  };
+  (s.addEventListener as (t: string, l: () => void, o?: unknown) => void)("abort", onAbort, { once: true });
+  return () => (s.removeEventListener as (t: string, l: () => void) => void)("abort", onAbort);
+}
+
+/** Пустой пул и direct-fallback выключен: понятная ошибка без обращения в сеть. */
+function deliverRingBlocked(handler: unknown): void {
+  const h = handler as Record<string, unknown> | null;
+  if (typeof h?.onResponseError !== "function") return;
+  const err = new Error(t("proxyPoolEmptyNoDirect"));
+  (err as NodeJS.ErrnoException).code = "ENOPROXY";
+  try {
+    (h.onResponseError as (...a: unknown[]) => unknown).call(h, null, err);
+  } catch {
+    // отдача не должна ронять кольцо
+  }
+}
+
+/** CONNECT-ошибка → карантин + понятное сообщение; прочее — как есть. */
+function noteRingError(href: string, display: string, err: unknown, options: ProxyRingOptions): unknown {
+  if (!isProxyConnectError(err)) return err;
+  options.rotator.markConnectFailed(href);
+  const message = describeEndpointFailure(display, err);
+  options.onQuarantine?.({
+    display,
+    cooldownMs: PROXY_QUARANTINE_MS,
+    detail: (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err)),
+    message,
+  });
+  const wrapped = new Error(message);
+  wrapped.cause = err;
+  (wrapped as NodeJS.ErrnoException).code = (err as NodeJS.ErrnoException).code;
+  return wrapped;
+}
+
+/** Синхронный провал dispatch: тот же путь, что onResponseError. */
+function deliverRingError(handler: unknown, href: string, display: string, err: unknown, options: ProxyRingOptions): void {
+  const rewritten = noteRingError(href, display, err, options);
+  const h = handler as Record<string, unknown> | null;
+  if (typeof h?.onResponseError === "function") {
+    try {
+      (h.onResponseError as (...a: unknown[]) => unknown).call(h, null, rewritten);
+    } catch {
+      // отдача не должна ронять кольцо
+    }
+  }
+}
+
 export interface SelectiveDispatcherOptions {
   /** Куда идут запросы к NIM (обычно `undici.ProxyAgent`). */
   nvidia: DispatchTarget;
@@ -1305,9 +1588,14 @@ export interface DispatcherDeps {
   createRetryAgent?: (agent: DispatchTarget, retryOptions: Record<string, unknown>) => DispatchTarget;
 }
 
+/** Конфигурация кольца прокси для установки (без `createBareAgent`/`stackInnerLayers` — их собирает `ensureDispatcherInstalled`). */
+export type ProxyPoolInstallConfig = Omit<ProxyRingOptions, "createBareAgent" | "stackInnerLayers" | "closeAgent">;
+
 export interface InstallOptions {
-  /** Прокси `NVIDIA_NIM_PROXY`. Без него (но при заданной ротации) nvidia-маршрут идёт через прежний глобальный диспетчер. */
+  /** Легаси-прокси `NVIDIA_NIM_PROXY` (пул из одного). Без него (но при заданной ротации) nvidia-маршрут идёт через прежний глобальный диспетчер. */
   proxyUrl?: URL;
+  /** Пул прокси (новая форма). Если задан — ставится кольцо, `proxyUrl` игнорируется. */
+  proxyPool?: ProxyPoolInstallConfig;
   onObserved?: (status: number, headers: Record<string, string>) => void;
   onDiagnostic?: (diagnostic: NimDiagnostic) => void;
   onProxyError?: (message: string, cause: unknown) => void;
@@ -1327,11 +1615,31 @@ export interface InstallResult {
   nvidiaDirect?: DispatchTarget;
 }
 
-/** Внутренний nvidia-агент последней установки — keep-alive пул. Keys check ходит сюда, не создаёт новый ProxyAgent. */
+/** Внутренний nvidia-агент последней установки (легаси-одиночка) — keep-alive пул. */
 let lastNvidiaDirect: DispatchTarget | undefined;
+/** Установленное кольцо прокси (пул) и его ротатор — для pin-агента keys check. */
+let lastRing: (SelectiveDispatcherHandle & { __ringAgentFor(href: string): DispatchTarget }) | undefined;
+let lastRingRotator: ProxyRotator | undefined;
 
+/**
+ * Внутренний nvidia-агент без ротации/повторов: для пула — bare-агент текущего
+ * pin (keep-alive, не новый TCP к другому выходу); для легаси-одиночки — тот же
+ * ProxyAgent, что и раньше. Keys check и discovery ходят сюда.
+ */
 export function getNvidiaDirectDispatcher(): DispatchTarget | undefined {
+  if (lastRing && lastRingRotator) {
+    const pin = lastRingRotator.effectivePin();
+    if (pin) return lastRing.__ringAgentFor(pin);
+  }
   return lastNvidiaDirect;
+}
+
+/**
+ * Bare-агент конкретного эндпоинта пула (создаётся лениво). `proxy check`
+ * бьёт `GET /v1/models` через агент КАЖДОГО выхода, не только pin.
+ */
+export function getProxyEndpointAgent(href: string): DispatchTarget | undefined {
+  return lastRing?.__ringAgentFor(href);
 }
 
 /**
@@ -1342,34 +1650,58 @@ export function getNvidiaDirectDispatcher(): DispatchTarget | undefined {
 export function ensureDispatcherInstalled(deps: DispatcherDeps, options: InstallOptions): InstallResult {
   const current = deps.getGlobalDispatcher();
   if (isOurDispatcher(current)) {
+    // Для пула nvidiaDirect ленив: агента pin ещё может не быть — вызывающий
+    // берёт его `getNvidiaDirectDispatcher()` когда понадобится (keys check).
     return { installed: false, already: true, dispatcher: current, nvidiaDirect: lastNvidiaDirect };
   }
-  // Нечего ставить: ни прокси, ни ротации — поведение как сегодня, обёртка не нужна.
-  if (!options.proxyUrl && !options.rotation) return { installed: false, already: false };
-  // Основание nvidia-маршрута: прокси-агент, либо (без прокси) прежний глобальный диспетчер.
-  const base: DispatchTarget = options.proxyUrl
-    ? deps.createProxyAgent(options.proxyUrl)
-    : (current as DispatchTarget);
-  // In-band повтор перегрузки (тикет 29) — самый внутренний: HTTP 200 с
-  // `data: {"error": …}` в SSE не видит ни RetryAgent, ни ротация (оба по статусу).
-  const inBanded = options.inBandRetry ? withInBandOverloadRetry(base, options.inBandRetry) : base;
-  // Прозрачный повтор 429/5xx: наблюдатель выше повторителя и видит только конечный исход.
-  const retried =
-    options.retry && deps.createRetryAgent
-      ? withTransparentRetry(inBanded, options.retry, { createRetryAgent: deps.createRetryAgent })
-      : inBanded;
-  // Ротация ключей — поверх повтора: на каждый ключ сначала бюджет повторов, потом смена.
-  const nvidiaTarget = options.rotation ? withKeyRotation(retried, options.rotation) : retried;
+  const hasPool = !!options.proxyPool;
+  // Нечего ставить: ни прокси/пула, ни ротации — поведение как сегодня, обёртка не нужна.
+  if (!hasPool && !options.proxyUrl && !options.rotation) return { installed: false, already: false };
+
+  // Сборка внутреннего лука поверх bare-агента: in-band повтор → прозрачный
+  // повтор 429/5xx → ротация ключей. Все per-href лук-и разделяют ОДИН
+  // key-ротатор и пул ключей (их инжектирует вызывающая сторона в `rotation`).
+  const stackInner = (bare: DispatchTarget): DispatchTarget => {
+    const inBanded = options.inBandRetry ? withInBandOverloadRetry(bare, options.inBandRetry) : bare;
+    const retried =
+      options.retry && deps.createRetryAgent
+        ? withTransparentRetry(inBanded, options.retry, { createRetryAgent: deps.createRetryAgent })
+        : inBanded;
+    return options.rotation ? withKeyRotation(retried, options.rotation) : retried;
+  };
+
+  // Основание nvidia-маршрута.
+  let nvidiaTarget: DispatchTarget;
+  let legacyBase: DispatchTarget | undefined;
+  if (hasPool) {
+    const pool = options.proxyPool as ProxyPoolInstallConfig;
+    const ring = withProxyRing(current as DispatchTarget, {
+      ...pool,
+      createBareAgent: (href) => deps.createProxyAgent(new URL(href)),
+      stackInnerLayers: (bare) => stackInner(bare),
+    }) as SelectiveDispatcherHandle & { __ringAgentFor(href: string): DispatchTarget };
+    lastRing = ring;
+    lastRingRotator = pool.rotator;
+    lastNvidiaDirect = undefined;
+    nvidiaTarget = ring;
+  } else {
+    // Легаси-одиночка (или только ротация ключей): как сегодня.
+    legacyBase = options.proxyUrl ? deps.createProxyAgent(options.proxyUrl) : (current as DispatchTarget);
+    nvidiaTarget = stackInner(legacyBase);
+    lastRing = undefined;
+    lastRingRotator = undefined;
+    lastNvidiaDirect = legacyBase;
+  }
+
   const duck = createSelectiveDispatcher({
     nvidia: nvidiaTarget,
     fallback: current as DispatchTarget,
-    proxyUrl: options.proxyUrl?.toString(),
+    proxyUrl: hasPool ? undefined : options.proxyUrl?.toString(),
     onObserved: options.onObserved,
     onDiagnostic: options.onDiagnostic,
     onProxyError: options.onProxyError,
   });
   const dispatcher = deps.adapt ? deps.adapt(duck) : duck;
   deps.setGlobalDispatcher(dispatcher);
-  lastNvidiaDirect = base;
-  return { installed: true, already: false, dispatcher, nvidiaDirect: base };
+  return { installed: true, already: false, dispatcher, nvidiaDirect: legacyBase };
 }

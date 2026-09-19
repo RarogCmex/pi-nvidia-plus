@@ -3,6 +3,7 @@
 import assert from "node:assert";
 import {
   NVIDIA_ORIGIN,
+  isProxyConnectError,
   parseProxyUrl,
   isNvidiaOrigin,
   headersToRecord,
@@ -585,6 +586,19 @@ function makeTarget(name: string) {
   wrapper.dispatch({ origin: NVIDIA_ORIGIN, method: "POST", headers: { authorization: "Bearer nvapi-x" }, body: "{}" }, {});
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(retryTarget.calls.length, 1, "запрос дошёл до повторителя сквозь ротацию");
+}
+
+// 20. isProxyConnectError делегирует единому классификатору шва пула:
+// кольцо и `proxy check` карантинят один класс (включая EHOSTUNREACH и cause).
+{
+  const mk = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
+  for (const code of ["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "ETIMEDOUT", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "EPROXYAUTH"]) {
+    assert.equal(isProxyConnectError(mk(code)), true, code);
+  }
+  assert.equal(isProxyConnectError(mk("UND_ERR_HEADERS_TIMEOUT")), false, "headers-timeout — не CONNECT-класс");
+  assert.equal(isProxyConnectError(Object.assign(new Error("fetch failed"), { cause: mk("ECONNREFUSED") })), true, "вложенная причина");
+  assert.equal(isProxyConnectError(new Error("обычная ошибка")), false);
+  assert.equal(isProxyConnectError(undefined), false);
 }
 
 console.log("proxy: все проверки прошли");

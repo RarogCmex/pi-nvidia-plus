@@ -38,6 +38,18 @@ assert.deepEqual(m.formatParts().groups.map((g) => g.kind), [
   "cooldownWaits",
 ]);
 
+// Счётчик смены pin прокси (spec proxy-pool): виден в сводке только ненулевым.
+m.proxySwitches = 2;
+assert.deepEqual(m.formatParts().groups.map((g) => g.kind), [
+  "retries",
+  "inBandRetries",
+  "keySwitches",
+  "deadKeys",
+  "cooldownWaits",
+  "proxySwitches",
+]);
+assert.equal(m.snapshot().proxySwitches, 2);
+
 // Снимок — копия: мутации снимка не влияют на счётчик.
 const snap = m.snapshot();
 snap.responses.set(500, 99);

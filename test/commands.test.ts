@@ -5,7 +5,7 @@
  * CombinedAutocompleteProvider).
  */
 import assert from "node:assert/strict";
-import { completeArgs, nvidiaPlusArgSuggestions, nvidiaPlusCommands, type CommandSpec } from "../extensions/commands.ts";
+import { completeArgs, nvidiaPlusArgSuggestions, nvidiaPlusCommands, setDynamicPinIds, type CommandSpec } from "../extensions/commands.ts";
 import { setLocale } from "../extensions/i18n.ts";
 
 const catalog: CommandSpec[] = [
@@ -106,11 +106,11 @@ function values(prefix: string): string[] | null {
   assert.deepEqual(values("keys  c"), ["keys check"]);
 }
 
-// 9. Живой каталог nvidia-plus: keys и apply имеют второй уровень.
+// 9. Живой каталог nvidia-plus: keys и apply имеют второй уровень; proxy — третий.
 {
   setLocale("en");
   const names = nvidiaPlusCommands().map((c) => c.name);
-  assert.deepEqual(names, ["apply", "rollback", "status", "keys", "discover"]);
+  assert.deepEqual(names, ["apply", "rollback", "status", "keys", "proxy", "discover"]);
   const keys = completeArgs("keys ", nvidiaPlusCommands());
   assert.deepEqual(keys?.map((i) => i.value), ["keys check", "keys on", "keys off"]);
   assert.equal(keys?.[0].label, "check");
@@ -122,6 +122,26 @@ function values(prefix: string): string[] | null {
   const root = completeArgs("", nvidiaPlusCommands());
   assert.equal(root?.find((i) => i.value === "keys ")?.label, "keys [check|on|off]");
   assert.equal(root?.find((i) => i.value === "apply ")?.label, "apply [force]");
+  const proxy = completeArgs("proxy ", nvidiaPlusCommands());
+  assert.deepEqual(proxy?.map((i) => i.value), ["proxy check", "proxy pin ", "proxy on", "proxy off"]);
+  assert.equal(root?.find((i) => i.value === "proxy ")?.label, "proxy [check|pin|on|off]");
+
+  // Третий уровень: `proxy pin ` (с пробелом) открывает динамический список id.
+  setDynamicPinIds(() => [
+    { id: "a.example:8080", description: "ready" },
+    { id: "b.example:3128", description: "cooldown 42s left" },
+  ]);
+  const third = completeArgs("proxy pin ", nvidiaPlusCommands());
+  assert.deepEqual(third?.map((i) => i.value), ["proxy pin a.example:8080", "proxy pin b.example:3128"]);
+  assert.deepEqual(third?.map((i) => i.label), ["a.example:8080", "b.example:3128"]);
+  assert.deepEqual(third?.map((i) => i.description), ["ready", "cooldown 42s left"]);
+  // Фильтр по префиксу id.
+  const filtered = completeArgs("proxy pin b", nvidiaPlusCommands());
+  assert.deepEqual(filtered?.map((i) => i.value), ["proxy pin b.example:3128"]);
+  // Пустой пул — подсказки id нет.
+  setDynamicPinIds(() => []);
+  assert.equal(completeArgs("proxy pin ", nvidiaPlusCommands()), null);
+  setDynamicPinIds(undefined);
   setLocale(undefined);
 }
 
@@ -143,6 +163,7 @@ function values(prefix: string): string[] | null {
     "nvidia-plus rollback",
     "nvidia-plus status",
     "nvidia-plus keys",
+    "nvidia-plus proxy",
     "nvidia-plus discover",
   ]);
   assert.deepEqual(noSpace?.items.map((i) => i.label), [
@@ -150,12 +171,13 @@ function values(prefix: string): string[] | null {
     "rollback",
     "status",
     "keys [check|on|off]",
+    "proxy [check|pin|on|off]",
     "discover",
   ]);
 
   const root = nvidiaPlusArgSuggestions("/nvidia-plus ");
   assert.equal(root?.prefix, "");
-  assert.deepEqual(root?.items.map((i) => i.value), ["apply ", "rollback ", "status ", "keys ", "discover "]);
+  assert.deepEqual(root?.items.map((i) => i.value), ["apply ", "rollback ", "status ", "keys ", "proxy ", "discover "]);
 
   const keys = nvidiaPlusArgSuggestions("/nvidia-plus keys ");
   assert.equal(keys?.prefix, "keys ");
@@ -168,6 +190,20 @@ function values(prefix: string): string[] | null {
   const keysExact = nvidiaPlusArgSuggestions("/nvidia-plus keys");
   assert.equal(keysExact?.prefix, "keys");
   assert.deepEqual(keysExact?.items.map((i) => i.value), ["keys check", "keys on", "keys off"]);
+
+  // proxy: второй уровень — `pin ` с хвостовым пробелом (контракт value),
+  // третий уровень — id текущего пула через редакторный перехват.
+  const proxy = nvidiaPlusArgSuggestions("/nvidia-plus proxy ");
+  assert.equal(proxy?.prefix, "proxy ");
+  assert.deepEqual(proxy?.items.map((i) => i.value), ["proxy check", "proxy pin ", "proxy on", "proxy off"]);
+
+  setDynamicPinIds(() => [{ id: "us.ntt:42435", description: "ready" }]);
+  const pinIds = nvidiaPlusArgSuggestions("/nvidia-plus proxy pin ");
+  assert.equal(pinIds?.prefix, "proxy pin ");
+  assert.deepEqual(pinIds?.items.map((i) => i.value), ["proxy pin us.ntt:42435"]);
+  const pinPartial = nvidiaPlusArgSuggestions("/nvidia-plus proxy pin us");
+  assert.deepEqual(pinPartial?.items.map((i) => i.value), ["proxy pin us.ntt:42435"]);
+  setDynamicPinIds(undefined);
 }
 
 console.log("commands: все проверки прошли");

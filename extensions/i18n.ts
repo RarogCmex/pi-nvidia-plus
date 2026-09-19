@@ -35,6 +35,26 @@ export const MESSAGES = {
     en: "NIM key pool status; 'check' probes keys; 'off'/'on' toggles rotation in the live session",
     ru: "Статус пула ключей NIM; 'check' проверяет ключи; 'off'/'on' переключает ротацию в живой сессии",
   },
+  cmdProxyDesc: {
+    en: "NIM proxy pool settings; 'check' probes exits; 'pin' locks an exit; 'off'/'on' toggles the ring in the live session",
+    ru: "Настройки пула прокси NIM; 'check' проверяет выходы; 'pin' запирает выход; 'off'/'on' переключает кольцо в живой сессии",
+  },
+  cmdProxyCheckDesc: {
+    en: "probe every endpoint and pin the fastest reachable",
+    ru: "проверить каждый эндпоинт и закрепить самый быстрый достижимый",
+  },
+  cmdProxyPinDesc: {
+    en: "pin an exit by host:port without a full check",
+    ru: "закрепить выход по host:port без полной проверки",
+  },
+  cmdProxyOnDesc: {
+    en: "enable automatic proxy ring pick in this session",
+    ru: "включить автоматический выбор кольца прокси в этой сессии",
+  },
+  cmdProxyOffDesc: {
+    en: "lock the current pinned exit (no automatic pick) in this session",
+    ru: "запереть текущий закреплённый выход (без автовыбора) в этой сессии",
+  },
   cmdKeysCheckDesc: {
     en: "probe each pool key against the selected nvidia model",
     ru: "проверить каждый ключ пула на выбранной nvidia-модели",
@@ -96,8 +116,8 @@ export const MESSAGES = {
   },
 
   cmdRootDesc: {
-    en: "pi-nvidia-plus: subcommand — apply|rollback|status|keys|discover (autocomplete lists them and their args)",
-    ru: "pi-nvidia-plus: подкоманда — apply|rollback|status|keys|discover (автодополнение перечислит их и аргументы)",
+    en: "pi-nvidia-plus: subcommand — apply|rollback|status|keys|proxy|discover (autocomplete lists them and their args)",
+    ru: "pi-nvidia-plus: подкоманда — apply|rollback|status|keys|proxy|discover (автодополнение перечислит их и аргументы)",
   },
   cmdUsage: {
     en: "pi-nvidia-plus subcommands: {list}",
@@ -141,6 +161,10 @@ export const MESSAGES = {
     en: "cooldown waits: {n}",
     ru: "ожиданий кулдауна: {n}",
   },
+  metricsGroupProxySwitches: {
+    en: "proxy pin switches: {n}",
+    ru: "смен pin прокси: {n}",
+  },
   proxyUndiciNotFound: {
     en: "could not locate pi's undici (bases: {bases})",
     ru: "не удалось найти undici пи (базы: {bases})",
@@ -156,6 +180,210 @@ export const MESSAGES = {
   proxyUnreachable: {
     en: "NIM proxy {url} unreachable ({detail}) — check NVIDIA_NIM_PROXY",
     ru: "прокси NIM {url} недоступен ({detail}) — проверьте переменную NVIDIA_NIM_PROXY",
+  },
+  // Адрес прокси в сообщении об ошибке теперь может быть пулом — формулируем
+  // нейтрально (display identity), NVIDIA_NIM_PROXY упоминаем только для легаси.
+  proxyEndpointUnreachable: {
+    en: "NIM proxy {url} unreachable ({detail})",
+    ru: "прокси NIM {url} недоступен ({detail})",
+  },
+
+  // ── Пул прокси: разбор эндпоинтов (spec proxy-pool) ──────────────────
+  proxyEndpointEmpty: {
+    en: "empty proxy endpoint",
+    ru: "пустой прокси-эндпоинт",
+  },
+  proxyEndpointParseError: {
+    en: "could not parse proxy URL: {value}",
+    ru: "не удалось разобрать URL прокси: {value}",
+  },
+  proxyEndpointSchemeError: {
+    en: "proxy scheme “{scheme}” is not supported (only http/https CONNECT): {value}",
+    ru: "схема прокси «{scheme}» не поддерживается (только http/https CONNECT): {value}",
+  },
+  proxyLegacySchemeError: {
+    en: "could not parse NVIDIA_NIM_PROXY: scheme “{scheme}” is not supported (only http/https CONNECT): {value}",
+    ru: "не удалось разобрать NVIDIA_NIM_PROXY: схема «{scheme}» не поддерживается (только http/https CONNECT): {value}",
+  },
+  proxiesFileNotJson: {
+    en: "proxies file is not JSON: {error}",
+    ru: "файл прокси — не JSON: {error}",
+  },
+  proxiesFileShape: {
+    en: 'proxies file: expected object {"proxies": [...]}',
+    ru: 'файл прокси: ожидается объект {"proxies": [...]}',
+  },
+  proxiesFileNoArray: {
+    en: 'proxies file: missing "proxies" array',
+    ru: 'файл прокси: нет массива "proxies"',
+  },
+  proxiesFileNotStrings: {
+    en: 'proxies file: "proxies" must contain only strings',
+    ru: 'файл прокси: в "proxies" только строки',
+  },
+  proxiesFileEmptyString: {
+    en: 'proxies file: empty string in "proxies"',
+    ru: 'файл прокси: пустая строка в "proxies"',
+  },
+  proxiesFileVanished: {
+    en: "proxies file {path} vanished — keeping the previous pool ({count} endpoints)",
+    ru: "файл прокси {path} пропал — использую прежний пул ({count} эндп.)",
+  },
+  proxiesFilePerms: {
+    en: "proxies file {path} has mode {mode} — 600 recommended (credentials in URLs are still readable, but better restrict)",
+    ru: "файл прокси {path} имеет права {mode} — рекомендуется 600 (креденшелы в URL читаются, но лучше ограничить)",
+  },
+  proxiesFileUnreadable: {
+    en: "proxies file {path} is not readable ({error})",
+    ru: "файл прокси {path} не читается ({error})",
+  },
+  proxiesFileParse: {
+    en: "proxies file {path}: {error}",
+    ru: "файл прокси {path}: {error}",
+  },
+  proxiesUnresolved: {
+    en: "proxy from {source} did not resolve (no variable in {value}) — skipped",
+    ru: "прокси из {source} не разрешился (нет переменной в {value}) — пропущен",
+  },
+  proxyPoolEmptyNoDirect: {
+    en: "NIM proxy pool is empty — refusing to go direct (set NVIDIA_NIM_PROXY_FALLBACK_DIRECT=1 to allow)",
+    ru: "пул прокси NIM пуст — отказываюсь идти напрямую (задайте NVIDIA_NIM_PROXY_FALLBACK_DIRECT=1, чтобы разрешить)",
+  },
+  proxyPoolEmptyDirect: {
+    en: "NIM proxy pool is empty — requests go direct (NVIDIA_NIM_PROXY_FALLBACK_DIRECT is on)",
+    ru: "пул прокси NIM пуст — запросы идут напрямую (NVIDIA_NIM_PROXY_FALLBACK_DIRECT включён)",
+  },
+
+  // ── Пул прокси: панель настроек `/nvidia-plus proxy` ──────────────────
+  proxyPoolNotSet: {
+    en: 'pi-nvidia-plus: no proxy pool — set NVIDIA_NIM_PROXIES (comma-separated), or NVIDIA_NIM_PROXIES_FILE, or create ~/.pi/agent/{file} ({"proxies": ["http://…"]}); legacy single NVIDIA_NIM_PROXY still works',
+    ru: 'pi-nvidia-plus: пул прокси не задан — задайте NVIDIA_NIM_PROXIES (через запятую), или NVIDIA_NIM_PROXIES_FILE, или создайте ~/.pi/agent/{file} ({"proxies": ["http://…"]}); легаси-одиночка NVIDIA_NIM_PROXY по-прежнему работает',
+  },
+  proxyPanelSummary: {
+    en: "pi-nvidia-plus: proxy ring {state}; pool {source} ({count}); pin {pin}{pinLatency}; {rows}{edit}{metrics}{parseErrors}",
+    ru: "pi-nvidia-plus: кольцо прокси {state}; пул {source} ({count}); pin {pin}{pinLatency}; {rows}{edit}{metrics}{parseErrors}",
+  },
+  proxyPanelEmptyRows: {
+    en: "no endpoints",
+    ru: "эндпоинтов нет",
+  },
+  proxyRowReady: {
+    en: "ready",
+    ru: "готов",
+  },
+  proxyRowCooldown: {
+    en: "cooldown {seconds}s left",
+    ru: "кулдаун ещё {seconds} с",
+  },
+  proxyRowPinnedMark: {
+    en: " (pinned)",
+    ru: " (закреплён)",
+  },
+  proxyRowLatency: {
+    en: ", {ms} ms",
+    ru: ", {ms} мс",
+  },
+  proxyPanelEdit: {
+    en: ". The extension never writes the pool file — add/remove URLs in {source}",
+    ru: ". Расширение не пишет файл пула — добавляйте/убирайте URL в {source}",
+  },
+  proxyPanelMetrics: {
+    en: "; pin switches: {n}",
+    ru: "; смен pin: {n}",
+  },
+  proxyPanelParseErrors: {
+    en: "; parse errors: {errors}",
+    ru: "; ошибки разбора: {errors}",
+  },
+  proxyNonePinned: {
+    en: "—",
+    ru: "—",
+  },
+  proxyPoolIntro: {
+    en: "pi-nvidia-plus: NIM proxy ring {state} — pool {source}: {count}, pin {pin}. Settings: /nvidia-plus proxy",
+    ru: "pi-nvidia-plus: кольцо прокси NIM {state} — пул {source}: {count}, pin {pin}. Настройки: /nvidia-plus proxy",
+  },
+  proxyRingStateOn: {
+    en: "on",
+    ru: "вкл",
+  },
+  proxyRingStateOff: {
+    en: "off — pin locked (enable: /nvidia-plus proxy on)",
+    ru: "выкл — pin закреплён (включить: /nvidia-plus proxy on)",
+  },
+  proxyPoolIntroParseErrors: {
+    en: "pi-nvidia-plus: proxy pool {source}: {errors}",
+    ru: "pi-nvidia-plus: пул прокси {source}: {errors}",
+  },
+
+  // ── Пул прокси: check / pin / on / off ───────────────────────────────
+  cmdProxyUnknown: {
+    en: "pi-nvidia-plus proxy: unknown argument “{command}”. Available: {list} (empty shows the settings panel)",
+    ru: "pi-nvidia-plus proxy: неизвестный аргумент «{command}». Доступны: {list} (пустое показывает панель настроек)",
+  },
+  proxyCheckNoModel: {
+    en: "pi-nvidia-plus: proxy check needs a selected nvidia model — probes go to NIM through each exit",
+    ru: "pi-nvidia-plus: проверке прокси нужна выбранная nvidia-модель — пробы идут в NIM через каждый выход",
+  },
+  proxyCheckStart: {
+    en: "pi-nvidia-plus: probing {count} proxy endpoints (GET /v1/models through each, concurrency 2, 10s timeout, Esc cancels the rest)…",
+    ru: "pi-nvidia-plus: проверяю {count} прокси-эндпоинтов (GET /v1/models через каждый, параллельность 2, таймаут 10 с, Esc отменяет остаток)…",
+  },
+  proxyCheckSummary: {
+    en: "pi-nvidia-plus: proxy check in {seconds} s — ok: {ok}, unreachable: {unreachable}, unknown: {unknown}{okRows}{pinNote}{abortedNote}",
+    ru: "pi-nvidia-plus: проверка прокси за {seconds} с — ok: {ok}, недоступны: {unreachable}, не определены: {unknown}{okRows}{pinNote}{abortedNote}",
+  },
+  proxyCheckOkRow: {
+    en: "; {display} — {ms} ms",
+    ru: "; {display} — {ms} мс",
+  },
+  proxyCheckPinNote: {
+    en: "; pin → {display}",
+    ru: "; pin → {display}",
+  },
+  proxyCheckNoOk: {
+    en: "; no reachable endpoint — pin unchanged ({pin})",
+    ru: "; ни одного достижимого выхода — pin не изменился ({pin})",
+  },
+  proxyCheckAborted: {
+    en: "; aborted (Esc) — {skipped} probes skipped",
+    ru: "; прервано (Esc) — пропущено проб: {skipped}",
+  },
+  proxyCheckFailed: {
+    en: "pi-nvidia-plus: proxy check failed — {error}",
+    ru: "pi-nvidia-plus: проверка прокси не удалась — {error}",
+  },
+  proxyPinnedSet: {
+    en: "pi-nvidia-plus: pin set to {display} (session-only; the pool file is not written)",
+    ru: "pi-nvidia-plus: pin установлен на {display} (только сессия; файл пула не пишется)",
+  },
+  proxyPinUsage: {
+    en: "pi-nvidia-plus: proxy pin <host:port> — lock an exit for this session. Pool ids: {ids}",
+    ru: "pi-nvidia-plus: proxy pin <host:port> — запереть выход на эту сессию. Id пула: {ids}",
+  },
+  proxyPinUnknown: {
+    en: "pi-nvidia-plus: unknown proxy id “{command}”. Pool ids: {ids}",
+    ru: "pi-nvidia-plus: неизвестный id прокси «{command}». Id пула: {ids}",
+  },
+  proxyRotationToggled: {
+    en: "pi-nvidia-plus: proxy ring {state} (env: NVIDIA_NIM_PROXY_ROTATION)",
+    ru: "pi-nvidia-plus: кольцо прокси {state} (среда: NVIDIA_NIM_PROXY_ROTATION)",
+  },
+  proxyRotationToggledOn: {
+    en: "enabled",
+    ru: "включено",
+  },
+  proxyRotationToggledOff: {
+    en: "disabled — current pin locked",
+    ru: "выключено — текущий pin закреплён",
+  },
+  statusProxyPool: {
+    en: "proxy ring: {rotation}, pool {source} ({count}), pin {pin}",
+    ru: "кольцо прокси: {rotation}, пул {source} ({count}), pin {pin}",
+  },
+  statusProxyPoolInstalled: {
+    en: "proxy ring: {rotation}, pool {source} ({count}), pin {pin} (installed)",
+    ru: "кольцо прокси: {rotation}, пул {source} ({count}), pin {pin} (установлен)",
   },
 
   // ── Диагностика 429/5xx (тикет 11) ───────────────────────────────────
@@ -188,6 +416,14 @@ export const MESSAGES = {
   retryInBandExhausted: {
     en: "NIM overloaded (“{reason}”): {attempts} attempts did not help — returning the error to pi",
     ru: "NIM перегружен («{reason}»): {attempts} попыток не помогли — отдаю ошибку пи",
+  },
+  retryScheduledOverloaded: {
+    en: "NIM 503 (Service temporarily overloaded): retrying transparently (attempt {attempt} of {total}, in {seconds}s)",
+    ru: "NIM 503 (Сервис временно перегружен): повторяю прозрачно (попытка {attempt} из {total}, через {seconds} с)",
+  },
+  retryOverloadedExhausted: {
+    en: "NIM 503 (Service temporarily overloaded): {attempts} attempts did not help — returning the error to pi",
+    ru: "NIM 503 (Сервис временно перегружен): {attempts} попыток не помогли — отдаю ошибку пи",
   },
   statusRetryOn: {
     en: "transparent retry (429/5xx + in-band overload): on (up to {count} retries each)",

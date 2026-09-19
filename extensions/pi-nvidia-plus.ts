@@ -47,19 +47,33 @@ import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscove
 import { transformRequest, thinkingPlan, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
+import {
+  DEFAULT_PROXIES_FILE_NAME,
+  PROXY_CHECK_CONCURRENCY,
+  PROXY_PROBE_TIMEOUT_MS,
+  ProxyPool,
+  ProxyRotator,
+  maskProxy,
+  redactProxyCredentials,
+  runProxyProbes,
+  type ProxyProbeAttempt,
+  type ProxyProbeEndpoint,
+} from "./proxy-pool.ts";
 import { classifyKeyProbeStatus, keyCheckUnknownSample, type KeyCheckOutcome } from "./key-check.ts";
 import { SessionMetrics } from "./metrics.ts";
 import { t } from "./i18n.ts";
-import { completeArgs, formatCommandLine, nvidiaPlusArgSuggestions, nvidiaPlusCommands } from "./commands.ts";
+import { completeArgs, formatCommandLine, nvidiaPlusArgSuggestions, nvidiaPlusCommands, setDynamicPinIds } from "./commands.ts";
 import {
   parseProxyUrl,
   ensureDispatcherInstalled,
   isProxyConnectError,
   describeProxyFailure,
+  describeEndpointFailure,
   formatDiagnostic,
   markDispatcher,
   NVIDIA_ORIGIN,
   getNvidiaDirectDispatcher,
+  getProxyEndpointAgent,
   type NimDiagnostic,
 } from "./proxy.ts";
 
@@ -78,6 +92,7 @@ function metricsSummary(): string {
     keySwitches: t("metricsGroupKeySwitches", { n: metrics.keySwitches }),
     deadKeys: t("metricsGroupDeadKeys", { n: metrics.deadKeys }),
     cooldownWaits: t("metricsGroupCooldownWaits", { n: metrics.cooldownWaits }),
+    proxySwitches: t("metricsGroupProxySwitches", { n: metrics.proxySwitches }),
   };
   const extra = groups.length > 0 ? `; ${groups.map((g) => groupLabels[g.kind]).join("; ")}` : "";
   return t("metricsSummary", {
@@ -174,6 +189,10 @@ interface ProxyState {
 
 const proxyState: ProxyState = { configured: false, installed: false, preflightDone: false };
 let proxyErrorNotified = false;
+// Карантин CONNECT: одно уведомление на display identity за сессию — веер
+// пи-сабагентов не должен заваливать пользователя одинаковыми ошибками.
+const notifiedQuarantines = new Set<string>();
+let proxyEmptyPoolNotified = false;
 // Критерий приёмки №2 (ошибка запроса): наблюдатель диспетчера видит 404/410,
 // которые минуют `after_provider_response`. Уведомляем один раз на модель+статус.
 const notifiedDeadResponses = new Set<string>();
@@ -234,6 +253,75 @@ function notifyRotationIntro(ui: { notify: Notifier }): void {
     t("rotationIntro", { state, source: keyPool.describe(), count: poolSize }),
     "info",
   );
+}
+
+// ── Пул прокси NIM (spec proxy-pool) ─────────────────────────────
+// Та же форма, что у пула ключей: один победивший источник (инлайн / файл /
+// легаси-одиночка), горячая перезагрузка, расширение файл не пишет.
+const proxyPool = new ProxyPool({
+  defaultPath: join(homedir(), ".pi", "agent", DEFAULT_PROXIES_FILE_NAME),
+  env: process.env as Record<string, string | undefined>,
+  onWarn: (message) => proxyState.notify?.(message, "warning"),
+});
+const proxyRotator = new ProxyRotator();
+// Тикет 04: общая память о карантинах между процессами pi (дети pi-subagents).
+// Выключатель: NVIDIA_NIM_SHARED_PROXY=0 (те же falsey-токены, что у ключей).
+// Подключается только когда источник — ПУЛ (легаси-одиночка живёт как сегодня).
+function proxySharedStateEnabled(): boolean {
+  return !/^(0|false|no|off)$/i.test(process.env.NVIDIA_NIM_SHARED_PROXY?.trim() ?? "");
+}
+if (proxyPool.hasSource() && proxyPool.winningSource()?.kind !== "legacy" && proxySharedStateEnabled()) {
+  proxyRotator.attachSharedState(join(homedir(), ".pi", "agent", "nvidia-proxies-state.json"));
+}
+const proxyRotationState = {
+  enabled: (() => {
+    const raw = process.env.NVIDIA_NIM_PROXY_ROTATION?.trim().toLowerCase();
+    return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
+  })(),
+};
+function proxyDirectFallbackEnabled(): boolean {
+  const raw = process.env.NVIDIA_NIM_PROXY_FALLBACK_DIRECT?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/** Пул (не легаси-одиночка) задан — ставится кольцо. */
+function proxyPoolActive(): boolean {
+  if (!proxyPool.hasSource()) return false;
+  return proxyPool.winningSource()?.kind !== "legacy";
+}
+
+/** Display identity текущего эффективного pin (или «—»). */
+function pinnedProxyDisplay(): string {
+  const pin = proxyRotator.effectivePin();
+  return pin ? maskProxy(pin) : t("proxyNonePinned");
+}
+
+// Представление кольца прокси — один раз и только при выбранной модели nvidia
+// (тикет 16: на Claude/OpenAI-сессиях расширение молчит).
+let proxyPoolIntroNotified = false;
+function notifyProxyPoolIntro(ui: { notify: Notifier }): void {
+  // Легаси-одиночка представляется прежним proxyIntro — кольцо только для пула.
+  if (proxyPoolIntroNotified || !proxyPoolActive()) return;
+  proxyPoolIntroNotified = true;
+  const pool = proxyPool.refresh();
+  const errors = proxyPool.parseErrors();
+  if (errors.length > 0 && pool.length === 0) {
+    // Опечатка/socks в источнике — не «не настроен», а видимая ошибка (тикет 18).
+    ui.notify(t("proxyPoolIntroParseErrors", { source: proxyPool.describe(), errors: errors.join("; ") }), "error");
+    return;
+  }
+  proxyRotator.setPool(pool);
+  const state = proxyRotationState.enabled ? t("proxyRingStateOn") : t("proxyRingStateOff");
+  ui.notify(
+    t("proxyPoolIntro", { state, source: proxyPool.describe(), count: pool.length, pin: pinnedProxyDisplay() }),
+    "info",
+  );
+  // Story 23: часть записей не разобралась (socks/опечатка) — интро называет их
+  // явно, даже когда пул в целом рабочий: ошибка не должна молчать.
+  if (errors.length > 0) {
+    ui.notify(t("proxyPoolIntroParseErrors", { source: proxyPool.describe(), errors: errors.join("; ") }), "warning");
+  }
+  void preflightProxy();
 }
 
 // Прокси-интро (тикет 16) — один раз и только при выбранной модели nvidia:
@@ -331,9 +419,12 @@ function resolvePiUndici(): { undici?: any; error?: string } {
 function ensureTransportInstalled(): void {
   if (proxyState.installError) return;
   const proxyReady = !!(proxyState.configured && proxyState.url);
+  // Пул прокси (spec proxy-pool): кольцо ставится при пул-источнике;
+  // легаси-одиночка идёт прежним путём `proxyUrl` (пул из одного).
+  const ringMode = proxyPoolActive();
   // Пул ключей (тикет 15): обёртка ставится и без прокси, если пул задан.
   const poolPresent = keyPool.hasSource();
-  if (!proxyReady && !poolPresent) return; // без конфигурации поведение не меняется
+  if (!ringMode && !proxyReady && !poolPresent) return; // без конфигурации поведение не меняется
   const { undici, error } = resolvePiUndici();
   if (!undici) {
     proxyState.installError = error;
@@ -394,6 +485,39 @@ function ensureTransportInstalled(): void {
         log: (stage: string, label: string, payload: unknown) => debug(stage, label, payload),
       }
     : undefined;
+  // Кольцо прокси: pick один на dispatch, весь внутренний круг ключей и
+  // повторов — на том же выходе (pin-инвариант). Все per-href луки разделяют
+  // ОДИН key-ротатор (`rotation` выше инжектится в каждый через stackInner).
+  const proxyRing = ringMode
+    ? {
+        rotator: proxyRotator,
+        getPoolHrefs: () => proxyPool.refresh(),
+        rotationEnabled: () => proxyRotationState.enabled,
+        directFallbackEnabled: proxyDirectFallbackEnabled,
+        onPinSwitch: (info: { from?: string; to: string }) => {
+          metrics.proxySwitches++;
+          debug("proxy-pin-switch", `${info.from ?? "—"} → ${info.to}`, info);
+        },
+        onQuarantine: (info: { display: string; cooldownMs: number; detail: string; message: string }) => {
+          debug("proxy-quarantine", `${info.display} — ${info.detail}, карантин ${info.cooldownMs} мс`, {});
+          proxyState.preflightError ??= info.message;
+          // Не спамим на веере: одно уведомление на display за сессию (дети
+          // pi-subagents headless — уведомляет только родитель).
+          if (notifiedQuarantines.has(info.display)) return;
+          notifiedQuarantines.add(info.display);
+          proxyState.notify?.(`pi-nvidia-plus: ${info.message}`, "error");
+        },
+        onDirectFallback: (allowed: boolean) => {
+          if (proxyEmptyPoolNotified) return;
+          proxyEmptyPoolNotified = true;
+          debug("proxy-direct-fallback", allowed ? "пустой пул — direct по флагу" : "пустой пул — direct запрещён", {});
+          proxyState.notify?.(
+            t(allowed ? "proxyPoolEmptyDirect" : "proxyPoolEmptyNoDirect"),
+            allowed ? "warning" : "error",
+          );
+        },
+      }
+    : undefined;
   const result = ensureDispatcherInstalled(
     {
       getGlobalDispatcher: () => undici.getGlobalDispatcher(),
@@ -418,7 +542,8 @@ function ensureTransportInstalled(): void {
       },
     },
     {
-      proxyUrl: proxyReady ? proxyState.url : undefined,
+      proxyUrl: !ringMode && proxyReady ? proxyState.url : undefined,
+      proxyPool: proxyRing,
       rotation,
       onObserved: (status, headers) => {
         metrics.noteResponse(status);
@@ -511,16 +636,52 @@ function ensureTransportInstalled(): void {
     keyRotationState.installedWithRotation = !!rotation;
     debug(
       "proxy-installed",
-      proxyReady ? proxyState.url!.toString() : "(без прокси — ротация ключей)",
-      { fallback: "предыдущий глобальный диспетчер", повтор: transportRetryEnabled(), ротация: !!rotation },
+      ringMode ? `(кольцо прокси: ${proxyPool.describe()})` : proxyReady ? maskProxy(proxyState.url!) : "(без прокси — ротация ключей)",
+      { fallback: "предыдущий глобальный диспетчер", повтор: transportRetryEnabled(), ротация: !!rotation, кольцо: ringMode },
     );
   } else {
-    debug("proxy-install-skip", proxyReady ? proxyState.url!.toString() : "(без прокси)", { already: result.already });
+    debug(
+      "proxy-install-skip",
+      ringMode ? "(кольцо прокси)" : proxyReady ? maskProxy(proxyState.url!) : "(без прокси)",
+      { already: result.already },
+    );
   }
 }
 
 async function preflightProxy(): Promise<void> {
-  if (!proxyState.configured || proxyState.preflightDone || !proxyState.url) return;
+  if (proxyState.preflightDone) return;
+  if (proxyPoolActive()) {
+    // Story 22: префлайт бьёт ТОЛЬКО pin/первый — десять жилых CONNECT-ов не
+    // должны блокировать выбор модели. Любой HTTP-ответ — выход достижим.
+    proxyState.preflightDone = true;
+    ensureTransportInstalled();
+    const pin = proxyRotator.effectivePin();
+    if (!pin) return;
+    const { undici } = resolvePiUndici();
+    const agent = getProxyEndpointAgent(pin);
+    if (!undici || !agent) return;
+    const display = maskProxy(pin);
+    const startedAt = Date.now();
+    try {
+      const res = await undici.request(`${NVIDIA_ORIGIN}/v1/models`, {
+        method: "GET",
+        dispatcher: agent,
+        headersTimeout: PROXY_PROBE_TIMEOUT_MS,
+        bodyTimeout: PROXY_PROBE_TIMEOUT_MS,
+      });
+      await res.body.text();
+      proxyRotator.markOk(pin, Date.now() - startedAt);
+    } catch (e) {
+      const cause = (e as { cause?: unknown } | null)?.cause ?? e;
+      if (isProxyConnectError(e) || isProxyConnectError(cause)) {
+        proxyRotator.markConnectFailed(pin);
+        proxyState.preflightError = describeEndpointFailure(display, cause);
+        proxyState.notify?.(proxyState.preflightError, "error");
+      }
+    }
+    return;
+  }
+  if (!proxyState.configured || !proxyState.url) return;
   proxyState.preflightDone = true;
   try {
     // Любой HTTP-ответ — прокси достижим. Идём на `/v1/models` (200 без
@@ -537,10 +698,28 @@ async function preflightProxy(): Promise<void> {
 }
 
 function initProxyFromEnv(): void {
+  const winning = proxyPool.winningSource();
+  if (winning && winning.kind !== "legacy") {
+    // Пул (инлайн/файл): разбираем сейчас, чтобы ошибки/предупреждения доехали
+    // до интро; кольцо ставится в ensureTransportInstalled.
+    const hrefs = proxyPool.refresh();
+    proxyRotator.setPool(hrefs);
+    proxyState.configured = true;
+    debug("proxy-init", "пул прокси", {
+      source: proxyPool.describe(),
+      count: hrefs.length,
+      displays: hrefs.map((h) => maskProxy(h)),
+      errors: proxyPool.parseErrors(),
+    });
+    ensureTransportInstalled();
+    return;
+  }
+  // Легаси-одиночка (или ничего): байт-в-байт как сегодня.
   const parsed = parseProxyUrl(process.env.NVIDIA_NIM_PROXY);
+  // Story 39: даже в отладочном логе userinfo не показываем.
   debug("proxy-init", "разбор NVIDIA_NIM_PROXY", {
-    raw: process.env.NVIDIA_NIM_PROXY ?? "(не задана)",
-    url: parsed.url?.toString(),
+    raw: process.env.NVIDIA_NIM_PROXY ? redactProxyCredentials(process.env.NVIDIA_NIM_PROXY) : "(не задана)",
+    url: parsed.url ? maskProxy(parsed.url) : undefined,
     error: parsed.error,
   });
   if (parsed.error) {
@@ -588,6 +767,8 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.hasUI) {
       proxyState.notify = (message, type) => ctx.ui.notify(message, type);
+      // Третий уровень автодополнения `proxy pin <id>`: id текущего пула.
+      setDynamicPinIds(proxyPinIds);
       // Tab после `/nvidia-plus ` в TUI идёт с force=true и минует
       // getArgumentCompletions (файлы вместо подкоманд). Перехват сверху.
       ctx.ui.addAutocompleteProvider((current) => ({
@@ -609,6 +790,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     ensureTransportInstalled();
     // Прокси и ротация представляются только при выбранной модели nvidia (тикет 16).
     if (ctx.hasUI && ctx.model?.provider === PROVIDER) {
+      notifyProxyPoolIntro(ctx.ui);
       notifyProxyIntro(ctx.ui);
       notifyRotationIntro(ctx.ui);
     }
@@ -654,6 +836,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       lastNvidiaModelId = undefined;
       return;
     }
+    notifyProxyPoolIntro(ctx.ui);
     notifyProxyIntro(ctx.ui);
     notifyRotationIntro(ctx.ui);
     const dead = DEAD_MODELS[event.model.id];
@@ -814,18 +997,32 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const auto = loadState()?.enabled === false ? t("statusAutoOff") : t("statusAutoOn");
       // Тикет 18: при битом разборе configured сброшен — показываем ошибку,
       // а не «не настроен», чтобы опечатка в переменной не молчала.
-      const proxy = proxyState.configured
-        ? proxyState.installError
-          ? t("statusProxyInstallError", { url: proxyState.url?.toString() ?? "?", error: proxyState.installError })
-          : proxyState.preflightError
-            ? t("statusProxyPreflightError", { url: proxyState.url?.toString() ?? "?", error: proxyState.preflightError })
-            : proxyState.installed
-              ? t("statusProxyInstalled", { url: proxyState.url?.toString() ?? "?" })
-              : t("statusProxyPlain", { url: proxyState.url?.toString() ?? "?" })
-        : proxyState.installError
-          ? t("statusProxyInstallError", { url: "?", error: proxyState.installError })
-          : t("statusProxyNotConfigured");
-      const retryState = proxyState.configured || keyPool.hasSource()
+      // Story 18 (proxy-pool): заголовок называет pin и count; полное кольцо —
+      // только в панели `/nvidia-plus proxy`.
+      const proxy = proxyPoolActive()
+        ? t(proxyState.installed ? "statusProxyPoolInstalled" : "statusProxyPool", {
+            rotation: proxyRotationState.enabled ? t("proxyRingStateOn") : t("proxyRingStateOff"),
+            source: proxyPool.describe(),
+            count: proxyPool.refresh().length,
+            pin: pinnedProxyDisplay(),
+          }) +
+          (proxyState.preflightError ? ` — ${proxyState.preflightError}` : "") +
+          // Story 23: ошибки разбора видны и в status, не только в панели.
+          (proxyPool.parseErrors().length > 0
+            ? ` — ${t("proxyPanelParseErrors", { errors: proxyPool.parseErrors().join("; ") }).replace(/^; /, "")}`
+            : "")
+        : proxyState.configured
+          ? proxyState.installError
+            ? t("statusProxyInstallError", { url: proxyState.url?.toString() ?? "?", error: proxyState.installError })
+            : proxyState.preflightError
+              ? t("statusProxyPreflightError", { url: proxyState.url?.toString() ?? "?", error: proxyState.preflightError })
+              : proxyState.installed
+                ? t("statusProxyInstalled", { url: proxyState.url?.toString() ?? "?" })
+                : t("statusProxyPlain", { url: proxyState.url?.toString() ?? "?" })
+          : proxyState.installError
+            ? t("statusProxyInstallError", { url: "?", error: proxyState.installError })
+            : t("statusProxyNotConfigured");
+      const retryState = proxyState.configured || keyPool.hasSource() || proxyPool.hasSource()
         ? transportRetryEnabled()
           ? t("statusRetryOn", { count: TRANSPORT_RETRY.maxRetries })
           : t("statusRetryOff")
@@ -963,6 +1160,212 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       );
   };
 
+  // ── Пул прокси NIM (spec proxy-pool): `/nvidia-plus proxy …` ────────
+  // TUI-панель настроек (сестра `keys`): файл пула остаётся пользовательским,
+  // глаголы мутируют только состояние сессии (pin, кольцо, побочный эффект check).
+  const proxyPanelText = (): string => {
+    const pool = proxyPool.refresh();
+    proxyRotator.setPool(pool);
+    if (!proxyPool.hasSource() && pool.length === 0) {
+      return t("proxyPoolNotSet", { file: DEFAULT_PROXIES_FILE_NAME });
+    }
+    const now = Date.now();
+    const errors = proxyPool.parseErrors();
+    if (pool.length === 0 && errors.length > 0) {
+      // Ошибка разбора — не «не настроен» (тикет 18): показываем её явно.
+      return t("proxyPoolIntroParseErrors", { source: proxyPool.describe(), errors: errors.join("; ") });
+    }
+    const statuses = proxyRotator.statusFor(now);
+    const rows = statuses.map((row) => {
+      const state =
+        row.state === "cooldown"
+          ? t("proxyRowCooldown", { seconds: Math.max(1, Math.round(row.cooldownLeftMs / 1000)) })
+          : t("proxyRowReady");
+      const pinnedMark = row.pinned ? t("proxyRowPinnedMark") : "";
+      const latency = row.lastLatencyMs !== undefined ? t("proxyRowLatency", { ms: row.lastLatencyMs }) : "";
+      return `${row.display}${pinnedMark} — ${state}${latency}`;
+    });
+    const pin = proxyRotator.effectivePin();
+    const pinLatency = statuses.find((s) => s.pinned)?.lastLatencyMs;
+    const edit = t("proxyPanelEdit", { source: proxyPool.describe() });
+    const metricsPart = metrics.proxySwitches > 0 ? t("proxyPanelMetrics", { n: metrics.proxySwitches }) : "";
+    const parsePart = errors.length > 0 ? t("proxyPanelParseErrors", { errors: errors.join("; ") }) : "";
+    const state = proxyRotationState.enabled ? t("proxyRingStateOn") : t("proxyRingStateOff");
+    return t("proxyPanelSummary", {
+      state,
+      source: proxyPool.describe(),
+      count: pool.length,
+      pin: pin ? maskProxy(pin) : t("proxyNonePinned"),
+      pinLatency: pinLatency !== undefined ? t("proxyRowLatency", { ms: pinLatency }) : "",
+      rows: rows.length > 0 ? rows.join("; ") : t("proxyPanelEmptyRows"),
+      edit,
+      metrics: metricsPart,
+      parseErrors: parsePart,
+    });
+  };
+
+  /** Display identity пула для автодополнения `proxy pin <id>`. */
+  const proxyPinIds = (): Array<{ id: string; description: string }> => {
+    const pool = proxyPool.refresh();
+    proxyRotator.setPool(pool);
+    const now = Date.now();
+    return proxyRotator.statusFor(now).map((row) => ({
+      id: row.display,
+      description:
+        row.state === "cooldown"
+          ? t("proxyRowCooldown", { seconds: Math.max(1, Math.round(row.cooldownLeftMs / 1000)) })
+          : t("proxyRowReady"),
+    }));
+  };
+
+  /** Одна проба `proxy check`: GET /v1/models через агент конкретного выхода. */
+  const probeProxyEndpoint = async (
+    undici: { request: (url: string, init: unknown) => Promise<{ statusCode: number; body: { text(): Promise<string> } }> },
+    endpoint: ProxyProbeEndpoint,
+  ): Promise<ProxyProbeAttempt> => {
+    try {
+      const agent = getProxyEndpointAgent(endpoint.href);
+      if (!agent) return { error: new Error("no agent") };
+      const res = await undici.request(`${NVIDIA_ORIGIN}/v1/models`, {
+        method: "GET",
+        dispatcher: agent,
+        headersTimeout: PROXY_PROBE_TIMEOUT_MS,
+        bodyTimeout: PROXY_PROBE_TIMEOUT_MS,
+      });
+      await res.body.text();
+      // Любой HTTP-ответ — выход достижим (story 13: проба про выход, не про auth).
+      return { status: res.statusCode };
+    } catch (e) {
+      return { error: e };
+    }
+  };
+
+  const cmdProxy = async (args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
+    const trimmed = (args ?? "").trim();
+    const [verb, ...verbRest] = trimmed.split(/\s+/).filter(Boolean);
+    if (verb && verb !== "check" && verb !== "pin" && verb !== "on" && verb !== "off") {
+      // Story 20: неизвестный аргумент — список глаголов, а не молчаливая панель.
+      const list = (nvidiaPlusCommands().find((c) => c.name === "proxy")?.args ?? [])
+        .map((a) => `${a.name.trimEnd()} — ${a.description}`)
+        .join("; ");
+      ctx.ui.notify(t("cmdProxyUnknown", { command: verb, list }), "info");
+      return;
+    }
+    if (verb === "on" || verb === "off") {
+      proxyRotationState.enabled = verb === "on";
+      ctx.ui.notify(
+        t("proxyRotationToggled", {
+          state: verb === "on" ? t("proxyRotationToggledOn") : t("proxyRotationToggledOff"),
+        }),
+        "info",
+      );
+      return;
+    }
+    if (verb === "pin") {
+      const ids = proxyPinIds();
+      if (ids.length === 0) {
+        ctx.ui.notify(t("proxyPoolNotSet", { file: DEFAULT_PROXIES_FILE_NAME }), "info");
+        return;
+      }
+      const id = verbRest.join(" ").trim();
+      if (!id) {
+        // Story 55: без id — usage + список id (info, не молчаливая панель).
+        ctx.ui.notify(t("proxyPinUsage", { ids: ids.map((entry) => entry.id).join(", ") }), "info");
+        return;
+      }
+      if (!proxyRotator.pinByDisplay(id)) {
+        ctx.ui.notify(t("proxyPinUnknown", { command: id, ids: ids.map((entry) => entry.id).join(", ") }), "info");
+        return;
+      }
+      ctx.ui.notify(t("proxyPinnedSet", { display: id }), "info");
+      return;
+    }
+    if (verb === "check") {
+      // Story 15: без выбранной nvidia-модели — явный отказ (на других провайдерах молчим).
+      const model = ctx.model;
+      if (!model || model.provider !== PROVIDER) {
+        ctx.ui.notify(t("proxyCheckNoModel"), "warning");
+        return;
+      }
+      const pool = proxyPool.refresh();
+      proxyRotator.setPool(pool);
+      if (pool.length === 0) {
+        const errors = proxyPool.parseErrors();
+        ctx.ui.notify(
+          errors.length > 0
+            ? t("proxyPoolIntroParseErrors", { source: proxyPool.describe(), errors: errors.join("; ") })
+            : t("proxyPoolNotSet", { file: DEFAULT_PROXIES_FILE_NAME }),
+          "info",
+        );
+        return;
+      }
+      ensureTransportInstalled();
+      const { undici, error } = resolvePiUndici();
+      if (!undici) {
+        ctx.ui.notify(t("proxyCheckFailed", { error: error ?? "undici" }), "error");
+        return;
+      }
+      ctx.ui.notify(t("proxyCheckStart", { count: pool.length }), "info");
+      const startedAt = Date.now();
+      // Story 51: Esc во время check останавливает ХВОСТ проб (сводка — по уже
+      // полученным). Перехват терминального ввода только на время прогона.
+      const abortCtl = new AbortController();
+      let offTerminal: (() => void) | undefined;
+      const terminalInput = ctx.ui.onTerminalInput as ((handler: (data: string) => { consume?: boolean } | undefined) => () => void) | undefined;
+      if (typeof terminalInput === "function") {
+        offTerminal = terminalInput.call(ctx.ui, (data: string) => {
+          if (data === "\x1b") {
+            abortCtl.abort();
+            return { consume: true };
+          }
+          return undefined;
+        });
+      }
+      try {
+        const endpoints: ProxyProbeEndpoint[] = pool.map((href) => ({ href, display: maskProxy(href) }));
+        const plan = await runProxyProbes(
+          endpoints,
+          (endpoint) => probeProxyEndpoint(undici, endpoint),
+          { concurrency: PROXY_CHECK_CONCURRENCY, isAborted: () => abortCtl.signal.aborted },
+        );
+        const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+        const counts = { ok: 0, unreachable: 0, unknown: 0 };
+        for (const row of plan.rows) counts[row.outcome] += 1;
+        const okRows = plan.rows
+          .filter((row) => row.outcome === "ok")
+          .map((row) => t("proxyCheckOkRow", { display: row.display, ms: row.latencyMs ?? 0 }))
+          .join("");
+        // Story 14 + исходы проб в состояние сессии — одной операцией шва
+        // (applyProbeResults): ok пишет exit quality и гасит карантин,
+        // unreachable карантинит (TTL), самый быстрый ok становится pin.
+        const pinnedDisplay = proxyRotator.applyProbeResults(plan.rows);
+        const pinNote = pinnedDisplay
+          ? t("proxyCheckPinNote", { display: pinnedDisplay })
+          : t("proxyCheckNoOk", { pin: pinnedProxyDisplay() });
+        const abortedNote = plan.aborted ? t("proxyCheckAborted", { skipped: plan.skipped }) : "";
+        ctx.ui.notify(
+          t("proxyCheckSummary", {
+            seconds,
+            ok: counts.ok,
+            unreachable: counts.unreachable,
+            unknown: counts.unknown,
+            okRows,
+            pinNote,
+            abortedNote,
+          }),
+          counts.ok === 0 ? "warning" : "info",
+        );
+      } catch (e) {
+        ctx.ui.notify(t("proxyCheckFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+      } finally {
+        offTerminal?.();
+      }
+      return;
+    }
+    // Пустые аргументы — панель настроек (story 53).
+    ctx.ui.notify(proxyPanelText(), "info");
+  };
+
   // ── Живое обнаружение моделей (тикет 12) ───────────────────────────────
   // Триггер — команда, а не старт сессии: обнаружение опционально и не должно
   // добавлять сетевую зависимость к каждой загрузке пи.
@@ -1032,10 +1435,13 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         );
       } catch (e) {
         const cause = (e as { cause?: unknown } | null)?.cause ?? e;
+        const pinHref = proxyPoolActive() ? proxyRotator.effectivePin() : undefined;
         const hint =
-          proxyState.configured && proxyState.url && (isProxyConnectError(e) || isProxyConnectError(cause))
-            ? ` — ${describeProxyFailure(proxyState.url.toString(), cause)}`
-            : "";
+          pinHref && (isProxyConnectError(e) || isProxyConnectError(cause))
+            ? ` — ${describeEndpointFailure(maskProxy(pinHref), cause)}`
+            : proxyState.configured && proxyState.url && (isProxyConnectError(e) || isProxyConnectError(cause))
+              ? ` — ${describeProxyFailure(proxyState.url.toString(), cause)}`
+              : "";
         ctx.ui.notify(
           t("discoverFailed", { hint, error: e instanceof Error ? e.message : String(e) }),
           "error",
@@ -1050,6 +1456,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     rollback: cmdRollback,
     status: cmdStatus,
     keys: cmdKeys,
+    proxy: cmdProxy,
     discover: cmdDiscover,
   };
 
