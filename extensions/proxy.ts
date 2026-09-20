@@ -31,9 +31,10 @@ export interface ParsedProxy {
 
 /**
  * Разбор `NVIDIA_NIM_PROXY` (легаси-одиночка). Без схемы подразумевается
- * `http://`; схемы кроме http/https отклоняются (story 40: socks у HTTP-only
- * ProxyAgent ундичи дал бы загадочный CONNECT-провал — лучше ошибка разбора,
- * называющая переменную, как в тикете 18).
+ * `http://`; допустимые схемы — http/https (HTTP CONNECT) и socks5/socks5h/
+ * socks (нативный Socks5ProxyAgent ундичи 8.9+, тикет 05); socks5h
+ * нормализуется в socks5. Прочее — понятная ошибка разбора, называющая
+ * переменную (тикет 18).
  */
 export function parseProxyUrl(raw: string | undefined): ParsedProxy {
   const value = raw?.trim();
@@ -48,7 +49,9 @@ export function parseProxyUrl(raw: string | undefined): ParsedProxy {
   } catch {
     return { error: t("proxyParseError", { value: shown }) };
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
+  if (url.protocol === "socks5h:") url.protocol = "socks5:";
+  const allowed = new Set(["http:", "https:", "socks5:", "socks:"]);
+  if (!allowed.has(url.protocol)) {
     return { error: t("proxyLegacySchemeError", { scheme: url.protocol.replace(/:$/, ""), value: shown }) };
   }
   return { url };
@@ -1283,7 +1286,6 @@ export function withProxyRing(base: DispatchTarget, options: ProxyRingOptions): 
       }
       lastPinDisplay = display;
 
-      const entry = entryFor(href);
       // Наблюдение исхода: CONNECT-класс → карантин + переписывание ошибки в
       // понятную (display identity); успех → markOk (снимает карантин, пишет
       // exit quality). 429/401/403/5xx/in-band — НЕ прокси: их обрабатывают
@@ -1299,6 +1301,25 @@ export function withProxyRing(base: DispatchTarget, options: ProxyRingOptions): 
         removeAbortListener?.();
         return true;
       };
+
+      // Создание агента — внутри try: конструктор может бросить (старый ундичи
+      // без Socks5ProxyAgent на socks-href, битый URL) — тогда выход карантинится
+      // и следующий dispatch берёт соседа, а fetch-вызывающий не падает.
+      let entry: RingEntry;
+      try {
+        entry = entryFor(href);
+      } catch (err) {
+        options.rotator.markConnectFailed(href, startedAt);
+        options.onQuarantine?.({
+          display,
+          cooldownMs: PROXY_QUARANTINE_MS,
+          detail: err instanceof Error ? err.message : String(err),
+          message: describeEndpointFailure(display, err),
+        });
+        deliverRingError(handler, href, display, err, options);
+        return true;
+      }
+
       const wrapped = wrapRingHandler(handler, href, display, options, startedAt, settle);
       options.rotator.noteInFlight(href);
       removeAbortListener = hookAbortRelease((opts as { signal?: unknown } | null)?.signal, settle);

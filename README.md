@@ -60,8 +60,8 @@ Tab-completion covers subcommands and their arguments (including `proxy pin <hos
 
 | Variable | Description |
 |---|---|
-| `NVIDIA_NIM_PROXY` | Legacy single HTTP(S) proxy URL (or `host:port`) used **only** for `integrate.api.nvidia.com`. Lowest-priority source; a pool of one. Unset (and no pool) = direct. Only `http`/`https` CONNECT — `socks://` is rejected with a parse error. |
-| `NVIDIA_NIM_PROXIES` | Comma-separated proxy-URL pool (highest priority). Each value `http://[user:pass@]host:port`. |
+| `NVIDIA_NIM_PROXY` | Legacy single proxy URL (or `host:port`) used **only** for `integrate.api.nvidia.com`. Lowest-priority source; a pool of one. Unset (and no pool) = direct. Schemes: `http`/`https` CONNECT and `socks5`/`socks5h`/`socks` (see below). |
+| `NVIDIA_NIM_PROXIES` | Comma-separated proxy-URL pool (highest priority). Each value `http://[user:pass@]host:port` or `socks5://[user:pass@]host:port`. |
 | `NVIDIA_NIM_PROXIES_FILE` | Path to `{"proxies": ["http://…"]}` pool file. Values support `$VAR` / `${VAR}` interpolation. |
 | `NVIDIA_NIM_PROXY_ROTATION` | `0`/`false`/`no`/`off` disables the automatic ring pick (the current pin stays locked). Default: on. |
 | `NVIDIA_NIM_SHARED_PROXY` | `0` disables the cross-process shared cooldown file (`~/.pi/agent/nvidia-proxies-state.json`). Default: enabled. |
@@ -90,7 +90,9 @@ The extension only **reads** this file. Your pi API key stays first in the rotat
 
 Exactly one source wins — `NVIDIA_NIM_PROXIES` > `NVIDIA_NIM_PROXIES_FILE` > the default file `~/.pi/agent/nvidia-proxies.json` (only if it exists) > the legacy single `NVIDIA_NIM_PROXY`. They are never merged. The extension only **reads** this file (hot-reload on `mtime`; a broken or vanished file keeps the last good pool and warns once); `chmod 600` is recommended since URLs may carry credentials.
 
-Per request to NIM the ring picks one **pin** — a sticky exit for the whole inner key/retry circle. A dead CONNECT goes to a 60 s **quarantine** (TTL, not a permanent denylist); 429/401/403/5xx and in-band overload never rotate the proxy (those are key/transport buckets). `/nvidia-plus proxy check` measures latency on a cheap `GET /v1/models` through each exit and pins the fastest reachable one. Only `http`/`https` CONNECT is supported (undici `ProxyAgent`); `socks://` is rejected. In notifications, status, logs and the shared state file every exit appears only as its display identity `host:port` — credentials are never written.
+Per request to NIM the ring picks one **pin** — a sticky exit for the whole inner key/retry circle. A dead CONNECT (including SOCKS handshake/auth failures) goes to a 60 s **quarantine** (TTL, not a permanent denylist); 429/401/403/5xx and in-band overload never rotate the proxy (those are key/transport buckets). `/nvidia-plus proxy check` measures latency on a cheap `GET /v1/models` through each exit and pins the fastest reachable one. In notifications, status, logs and the shared state file every exit appears only as its display identity `host:port` — credentials are never written.
+
+**SOCKS5** is served by undici's native `Socks5ProxyAgent` (bundled with pi ≥ 8.9; experimental — Node prints one `ExperimentalWarning` per process). `socks5h://` is normalized to `socks5://`: the native client always hands the hostname to the proxy (remote DNS), so the `h` distinction is degenerate for NIM. `socks4://` and other schemes are rejected with a parse error. On an older pi whose undici lacks `Socks5ProxyAgent`, a socks entry gets a clear error and is quarantined — the rest of the pool keeps working.
 
 ## How it works
 

@@ -2,7 +2,7 @@
 /**
  * Живая приёмка кольца прокси (spec proxy-pool, «Live acceptance is a short
  * checklist, not the seam»). Бьёт реальный NIM через реальные выходы, проверяя:
- *   1. разбор: socks:// отклоняются (story 40), http(s) принимаются;
+ *   1. разбор: socks5/socks5h принимаются (тикет 05), socks4/ftp отклоняются;
  *   2. приоритет источников: инлайн побеждает, легаси не подмешивается;
  *   3. `proxy check`-планировщик: параллельность 2, любой HTTP-ответ = ok,
  *      CONNECT-провал = unreachable, самый быстрый ok становится pin;
@@ -34,27 +34,34 @@ const NVIDIA_ORIGIN = "https://integrate.api.nvidia.com";
 
 /** Синтетические значения для проверки разбора (без живых креденшелов). */
 const SCHEME_FIXTURES = [
-  "socks5://user:pass@203.0.113.7:1080", // reject (socks, story 40)
-  "socks5h://user:pass@203.0.113.8:16901", // reject (socks)
-  "ftp://user:pass@203.0.113.9:21", // reject (не-http(s))
+  "socks4://user:pass@203.0.113.6:1080", // reject (socks4 не поддержан)
+  "ftp://user:pass@203.0.113.9:21", // reject (не-http(s)/socks5)
+  "socks5://user:pass@203.0.113.7:1080", // accept (тикет 05)
+  "socks5h://user:pass@203.0.113.8:16901", // accept, нормализуется в socks5
   "http://user:pass@203.0.113.10:8080", // accept
   "http://127.0.0.1:1/", // accept, заведомо мёртвый (ECONNREFUSED)
 ];
 
-console.log("=== 1. Разбор эндпоинтов (socks/ftp отклоняются, http принимаются) ===");
-let socksRejected = 0;
+console.log("=== 1. Разбор эндпоинтов (socks5/socks5h принимаются, socks4/ftp отклоняются) ===");
+let badRejected = 0;
 for (const raw of SCHEME_FIXTURES) {
   const parsed = parseProxyEndpoint(raw);
   const shown = raw.replace(/\/\/[^@]*@/, "//***@");
   if (parsed.href) {
     console.log(`  OK   ${parsed.display.padEnd(24)} ← ${shown}`);
   } else {
-    if (raw.startsWith("socks")) socksRejected += 1;
+    if (raw.startsWith("socks4") || raw.startsWith("ftp")) badRejected += 1;
     console.log(`  FAIL ${maskProxy(raw).padEnd(24)} — ${parsed.error}`);
   }
 }
-if (socksRejected < 2) {
-  console.error("  ✗ socks5/socks5h должны отклоняться (story 40)");
+// socks5h нормализуется в socks5 (DNS всегда на прокси — различие вырождено).
+const normalized = parseProxyEndpoint("socks5h://u:p@h.example:16901");
+if (!normalized.href?.startsWith("socks5://")) {
+  console.error("  ✗ socks5h должен нормализоваться в socks5");
+  process.exit(1);
+}
+if (badRejected < 2) {
+  console.error("  ✗ socks4/ftp должны отклоняться");
   process.exit(1);
 }
 

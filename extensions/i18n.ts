@@ -198,12 +198,16 @@ export const MESSAGES = {
     ru: "не удалось разобрать URL прокси: {value}",
   },
   proxyEndpointSchemeError: {
-    en: "proxy scheme “{scheme}” is not supported (only http/https CONNECT): {value}",
-    ru: "схема прокси «{scheme}» не поддерживается (только http/https CONNECT): {value}",
+    en: "proxy scheme “{scheme}” is not supported (http/https CONNECT and socks5 are): {value}",
+    ru: "схема прокси «{scheme}» не поддерживается (доступны http/https CONNECT и socks5): {value}",
   },
   proxyLegacySchemeError: {
-    en: "could not parse NVIDIA_NIM_PROXY: scheme “{scheme}” is not supported (only http/https CONNECT): {value}",
-    ru: "не удалось разобрать NVIDIA_NIM_PROXY: схема «{scheme}» не поддерживается (только http/https CONNECT): {value}",
+    en: "could not parse NVIDIA_NIM_PROXY: scheme “{scheme}” is not supported (http/https CONNECT and socks5 are): {value}",
+    ru: "не удалось разобрать NVIDIA_NIM_PROXY: схема «{scheme}» не поддерживается (доступны http/https CONNECT и socks5): {value}",
+  },
+  proxySocksUnsupported: {
+    en: "SOCKS5 exit {display} needs undici ≥ 8 with Socks5ProxyAgent — pi's undici is older; the exit is quarantined",
+    ru: "SOCKS5-выходу {display} нужен undici ≥ 8 с Socks5ProxyAgent — у пи старее; выход в карантине",
   },
   proxiesFileNotJson: {
     en: "proxies file is not JSON: {error}",

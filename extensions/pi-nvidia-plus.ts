@@ -522,7 +522,15 @@ function ensureTransportInstalled(): void {
     {
       getGlobalDispatcher: () => undici.getGlobalDispatcher(),
       setGlobalDispatcher: (d) => undici.setGlobalDispatcher(d),
-      createProxyAgent: (url: URL) => new undici.ProxyAgent(url.toString()),
+      createProxyAgent: (url: URL) => {
+        // Тикет 05: socks5 обслуживает нативный Socks5ProxyAgent (ProxyAgent
+        // делегирует сам, ундичи ≥ 8). На старом ундичи без него бросаем
+        // понятную ошибку — кольцо карантинит выход и берёт соседа.
+        if ((url.protocol === "socks5:" || url.protocol === "socks:") && !undici.Socks5ProxyAgent) {
+          throw new Error(t("proxySocksUnsupported", { display: maskProxy(url) }));
+        }
+        return new undici.ProxyAgent(url.toString());
+      },
       createRetryAgent: (agent, retryOptions) => new undici.RetryAgent(agent, retryOptions),
       adapt: (duck) => {
         class SelectiveDispatcher extends DispatcherBase {

@@ -13,6 +13,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
+import dns from "node:dns";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -121,7 +122,7 @@ function startConnectProxy(options: { requireAuth?: string } = {}): Promise<{
         close: () =>
           new Promise<void>((done) => {
             server.close(() => done());
-            server.closeAllConnections?.();
+            (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
           }),
       });
     });
@@ -157,7 +158,116 @@ function startOrigin(decide: (auth: string | undefined, body: string, attempt: n
         close: () =>
           new Promise<void>((done) => {
             server.close(() => done());
-            server.closeAllConnections?.();
+            (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
+          }),
+      });
+    });
+  });
+}
+
+
+/** Мини-SOCKS5 сервер (no-auth + user/pass, CONNECT, IPv4/domain ATYP). */
+function startSocks5Proxy(options: { requireAuth?: { user: string; pass: string } } = {}): Promise<{
+  port: number;
+  log: Array<{ host: string; port: number; authed: boolean }>;
+  close: () => Promise<void>;
+}> {
+  const log: Array<{ host: string; port: number; authed: boolean }> = [];
+  const server = net.createServer((sock) => {
+    let stage: "greeting" | "auth" | "request" | "done" = "greeting";
+    let authed = false;
+    const onData = (data: Buffer): void => {
+      try {
+        if (stage === "greeting") {
+          const methods = [...data.subarray(2)];
+          if (options.requireAuth && methods.includes(2)) {
+            sock.write(Buffer.from([5, 2]));
+            stage = "auth";
+            return;
+          }
+          if (methods.includes(0)) {
+            sock.write(Buffer.from([5, 0]));
+            stage = "request";
+            return;
+          }
+          sock.write(Buffer.from([5, 0xff]));
+          sock.end();
+          return;
+        }
+        if (stage === "auth") {
+          const ulen = data[1];
+          const user = data.subarray(2, 2 + ulen).toString();
+          const plen = data[2 + ulen];
+          const pass = data.subarray(3 + ulen, 3 + ulen + plen).toString();
+          if (user === options.requireAuth!.user && pass === options.requireAuth!.pass) {
+            authed = true;
+            sock.write(Buffer.from([1, 0]));
+            stage = "request";
+          } else {
+            sock.write(Buffer.from([1, 1]));
+            sock.end();
+          }
+          return;
+        }
+        if (stage === "request") {
+          const atyp = data[3];
+          let host: string;
+          let port: number;
+          let offset: number;
+          if (atyp === 1) {
+            host = [...data.subarray(4, 8)].join(".");
+            port = data.readUInt16BE(8);
+            offset = 10;
+          } else if (atyp === 3) {
+            const len = data[4];
+            host = data.subarray(5, 5 + len).toString();
+            port = data.readUInt16BE(5 + len);
+            offset = 7 + len;
+          } else {
+            sock.write(Buffer.from([5, 8, 0, 1, 0, 0, 0, 0, 0, 0]));
+            sock.end();
+            return;
+          }
+          log.push({ host, port, authed });
+          dns.lookup(host, (err, address) => {
+            if (err) {
+              sock.write(Buffer.from([5, 4, 0, 1, 0, 0, 0, 0, 0, 0]));
+              sock.end();
+              return;
+            }
+            const up = net.connect(port, address, () => {
+              const resp = Buffer.alloc(10);
+              resp[0] = 5;
+              resp[1] = 0;
+              resp[3] = 1;
+              resp.writeUInt16BE(port, 8);
+              sock.write(resp);
+              if (data.length > offset) up.write(data.subarray(offset));
+              up.pipe(sock);
+              sock.pipe(up);
+            });
+            up.on("error", () => sock.destroy());
+          });
+          stage = "done";
+        }
+      } catch {
+        sock.destroy();
+      }
+    };
+    sock.on("data", onData);
+    sock.on("error", () => {});
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("нет адреса socks");
+      resolve({
+        port: address.port,
+        log,
+        close: () =>
+          new Promise<void>((done) => {
+            server.close(() => done());
+            (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
           }),
       });
     });
@@ -346,6 +456,85 @@ function startOrigin(decide: (auth: string | undefined, body: string, attempt: n
     await ring.close();
     await origin.close();
     await proxyA.close();
+  }
+}
+
+/* ── Сценарий 5 (тикет 05): socks5-выход — обычный член пула ───────────── */
+{
+  const socks = await startSocks5Proxy({ requireAuth: { user: "u1", pass: "p1" } });
+  const origin = await startOrigin(() => ({ status: 200, body: '{"ok":"socks"}' }));
+  const rotator = new ProxyRotator({ random: () => 0 });
+  const hrefSocks = `socks5://u1:p1@127.0.0.1:${socks.port}`;
+  const quarantined: string[] = [];
+  const ring = withProxyRing({ dispatch: () => true }, {
+    rotator,
+    getPoolHrefs: () => [hrefSocks],
+    rotationEnabled: () => true,
+    directFallbackEnabled: () => false,
+    createBareAgent: (href) => new undici.ProxyAgent(href), // делегирует в Socks5ProxyAgent
+    stackInnerLayers: (bare) => bare,
+    onQuarantine: (info) => quarantined.push(info.display),
+  });
+  try {
+    rotator.setPool([hrefSocks]);
+    const res = await undici.fetch(`${origin.url}/v1/chat`, { dispatcher: ring as never });
+    assert.equal(res.status, 200, "запрос дошёл через SOCKS5-туннель");
+    assert.equal(await res.text(), '{"ok":"socks"}');
+    assert.equal(socks.log.length, 1, "SOCKS CONNECT ровно один");
+    assert.equal(socks.log[0].authed, true, "user/pass из href дошли до SOCKS-рукопожатия");
+    assert.deepEqual(quarantined, []);
+    assert.equal(maskProxy(hrefSocks), `127.0.0.1:${socks.port}`);
+    assert.ok((rotator.statusFor(Date.now())[0].lastLatencyMs ?? -1) >= 0, "exit quality записана");
+  } finally {
+    await ring.close();
+    await origin.close();
+    await socks.close();
+  }
+}
+
+/* ── Сценарий 6 (тикет 05): неверный пароль socks — карантин, не unknown ─ */
+{
+  const socks = await startSocks5Proxy({ requireAuth: { user: "u1", pass: "p1" } });
+  const origin = await startOrigin(() => ({ status: 200 }));
+  const rotator = new ProxyRotator({ random: () => 0 });
+  const bad = `socks5://u1:WRONG@127.0.0.1:${socks.port}`;
+  const good = `socks5://u1:p1@127.0.0.1:${socks.port}`;
+  const quarantined: string[] = [];
+  const ring = withProxyRing({ dispatch: () => true }, {
+    rotator,
+    getPoolHrefs: () => [bad, good],
+    rotationEnabled: () => true,
+    directFallbackEnabled: () => false,
+    createBareAgent: (href) => new undici.ProxyAgent(href),
+    stackInnerLayers: (bare) => bare,
+    onQuarantine: (info) => quarantined.push(info.display),
+  });
+  try {
+    rotator.setPool([bad, good]);
+    // Первый dispatch — pin на bad (первый в кольце при random 0): auth failed.
+    let caught: unknown;
+    try {
+      await undici.fetch(`${origin.url}/v1/chat`, { dispatcher: ring as never });
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught instanceof Error, "fetch отклонён");
+    assert.ok(
+      rotator.cooldownLeft(bad, Date.now()) > 0,
+      "UND_ERR_SOCKS5_AUTH_FAILED — CONNECT-класс: карантин поставлен",
+    );
+    assert.equal(quarantined.length, 1, `карантин уведомляет display identity: ${JSON.stringify(quarantined)}`);
+    assert.ok(!quarantined[0].includes("WRONG"), "пароль не в уведомлении");
+
+    // Второй dispatch — good ready: запрос проходит, pin сменился.
+    const res = await undici.fetch(`${origin.url}/v1/chat`, { dispatcher: ring as never });
+    assert.equal(res.status, 200);
+    await res.text();
+    assert.equal(socks.log.filter((e) => e.authed).length, 1, "успешное рукопожатие одно");
+  } finally {
+    await ring.close();
+    await origin.close();
+    await socks.close();
   }
 }
 

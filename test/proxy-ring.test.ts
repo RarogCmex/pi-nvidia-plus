@@ -132,6 +132,7 @@ function makeRing(opts: {
   rotationEnabled?: boolean;
   directFallback?: boolean;
   stack?: (bare: DispatchTarget) => DispatchTarget;
+  createAgent?: (href: string) => DispatchTarget | undefined;
   now?: () => number;
 }): RingHarness {
   const rotator = new ProxyRotator({ random: () => 0, quarantineMs: PROXY_QUARANTINE_MS });
@@ -166,6 +167,11 @@ function makeRing(opts: {
       rotationEnabled: () => opts.rotationEnabled ?? true,
       directFallbackEnabled: () => opts.directFallback ?? false,
       createBareAgent: (href) => {
+        const custom = opts.createAgent?.(href);
+        if (custom) {
+          agents.set(href, custom as unknown as AgentTarget);
+          return custom;
+        }
         const agent = makeAgentTarget(href, opts.respond, state);
         agents.set(href, agent);
         return agent;
@@ -362,6 +368,57 @@ function makeRing(opts: {
   h.ring.dispatch({ origin: "https://integrate.api.nvidia.com" }, r2);
   await flush();
   assert.equal(h.attempts[1].href, "http://a:1/", "off держит pin даже в карантине");
+}
+
+/* ── 7b. createBareAgent бросает (старый ундичи без Socks5ProxyAgent):
+ *      понятная ошибка, карантин, следующий dispatch — другой выход ──────── */
+{
+  const h = makeRing({
+    respond: () => ({ status: 200 }),
+    createAgent: (href) => {
+      if (href.startsWith("socks5:")) throw new Error("pi-nvidia-plus: SOCKS5 not supported by this undici");
+      return undefined; // дефолтный фейк-агент
+    },
+  });
+  h.setPool(["socks5://u:p@a:1080/", "http://b:2/"]);
+  const r1 = makeReceiver();
+  h.ring.dispatch({ origin: "https://integrate.api.nvidia.com" }, r1);
+  await flush();
+  assert.ok(r1.rec.error instanceof Error, "ошибка дошла до пи, dispatch не упал синхронно");
+  assert.ok((r1.rec.error as Error).message.includes("SOCKS5"), (r1.rec.error as Error).message);
+  assert.deepEqual(h.quarantined, ["a:1080"], "негодный выход карантинится");
+  const r2 = makeReceiver();
+  h.ring.dispatch({ origin: "https://integrate.api.nvidia.com" }, r2);
+  await flush();
+  assert.equal(r2.rec.status, 200, "следующий dispatch ушёл в рабочий выход");
+  assert.equal(h.attempts[h.attempts.length - 1].href, "http://b:2/");
+}
+
+/* ── 7b. createBareAgent бросает (старый ундичи без Socks5ProxyAgent):
+ *      понятная ошибка, карантин, следующий dispatch — другой выход ──────── */
+{
+  const h = makeRing({
+    respond: () => ({ status: 200, body: "ок" }),
+    createAgent: (href) => {
+      // Имитация ундичи < 8 на socks-href.
+      if (href.startsWith("socks5:")) throw new Error("SOCKS5 not supported by this undici");
+      return undefined; // http-href — штатный фейк-агент
+    },
+  });
+  h.setPool(["socks5://u:p@a:1080", "http://b:2/"]);
+  const r1 = makeReceiver();
+  h.ring.dispatch({ origin: "https://integrate.api.nvidia.com" }, r1);
+  await flush();
+  assert.ok(r1.rec.error instanceof Error, "ошибка дошла до хендлера, dispatch не упал синхронно");
+  assert.ok((r1.rec.error as Error).message.includes("SOCKS5"), (r1.rec.error as Error).message);
+  assert.deepEqual(h.quarantined, ["a:1080"], "негодный socks-выход карантинится");
+  assert.ok(h.rotator.cooldownLeft("socks5://u:p@a:1080", Date.now()) > 0);
+  // Следующий dispatch: socks в карантине, ротация берёт http-выход.
+  const r2 = makeReceiver();
+  h.ring.dispatch({ origin: "https://integrate.api.nvidia.com" }, r2);
+  await flush();
+  assert.equal(r2.rec.status, 200, "рабочий выход обслуживает запрос");
+  assert.equal(h.attempts[h.attempts.length - 1].href, "http://b:2/");
 }
 
 /* ── 8. ensureDispatcherInstalled с пулом: ленивые агенты, pin-агент для keys check ─ */

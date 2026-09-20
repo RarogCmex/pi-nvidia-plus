@@ -80,7 +80,7 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
   assert.equal(redactProxyCredentials("обычный текст"), "обычный текст");
 }
 
-/* ── 3. parseProxyEndpoint: http/https, без схемы → http, socks → ошибка ─ */
+/* ── 3. parseProxyEndpoint: http/https, без схемы → http, socks5 (тикет 05) ─ */
 {
   const ok = parseProxyEndpoint("http://1.2.3.4:8080");
   assert.equal(ok.href, "http://1.2.3.4:8080/");
@@ -94,12 +94,27 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
   assert.equal(creds.href, "https://user:pass@host.example/", "креденшелы сохраняются во внутреннем href (дефолтный порт нормализуется)");
   assert.equal(creds.display, "host.example", "display — без userinfo; дефолтный порт нормализуется URL");
 
-  for (const bad of ["socks5://u:p@1.2.3.4:1080", "socks5h://1.2.3.4:1080", "ftp://1.2.3.4:21"]) {
+  // Тикет 05: socks5 — член пула (нативный Socks5ProxyAgent ундичи 8.9+).
+  const socks = parseProxyEndpoint("socks5://u:p@1.2.3.4:1080");
+  assert.equal(socks.href, "socks5://u:p@1.2.3.4:1080", "без завершающего /: socks — неспециальная схема WHATWG");
+  assert.equal(socks.display, "1.2.3.4:1080", "display identity тот же, что у http");
+  assert.equal(socks.error, undefined);
+
+  // socks5h нормализуется в socks5: нативный клиент всегда шлёт hostname как
+  // ATYP DOMAIN (DNS на прокси) — различие `h` для нас вырождено.
+  const socksh = parseProxyEndpoint("socks5h://u:p@host.example:35593");
+  assert.equal(socksh.href, "socks5://u:p@host.example:35593", "socks5h → socks5");
+  assert.equal(socksh.display, "host.example:35593");
+
+  // socks: — синоним socks5 (принимает и конструктор ундичи).
+  assert.equal(parseProxyEndpoint("socks://u:p@h:1080").href, "socks://u:p@h:1080");
+
+  // Прочие схемы по-прежнему ошибка разбора (story 40).
+  for (const bad of ["ftp://1.2.3.4:21", "socks4://u:p@1.2.3.4:1080"]) {
     const res = parseProxyEndpoint(bad);
     assert.equal(res.href, undefined, bad);
-    assert.ok(res.error && res.error.length > 0, bad);
+    assert.ok(res.error?.includes("ftp") || res.error?.includes("socks4"), `${bad}: схема названа в ошибке — ${res.error}`);
   }
-  assert.ok(parseProxyEndpoint("socks5://u:p@h:1080").error?.includes("socks5"), "схема названа в ошибке");
 
   for (const bad of ["", "   ", "ht tp://некорректный", "http://"]) {
     assert.equal(parseProxyEndpoint(bad).href, undefined, bad);
@@ -107,10 +122,12 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
   }
 }
 
-/* ── 3b. Легаси parseProxyUrl тоже отклоняет не-http(s) схемы (story 40) ─ */
+/* ── 3b. Легаси parseProxyUrl принимает те же схемы (тикет 05) ─────────── */
 {
-  assert.ok(parseProxyUrl("socks5://1.2.3.4:1080").error, "socks5 в NVIDIA_NIM_PROXY — ошибка разбора");
-  assert.equal(parseProxyUrl("socks5://1.2.3.4:1080").url, undefined);
+  assert.equal(parseProxyUrl("socks5://u:p@1.2.3.4:1080").url?.toString(), "socks5://u:p@1.2.3.4:1080");
+  assert.equal(parseProxyUrl("socks5h://1.2.3.4:1080").url?.toString(), "socks5://1.2.3.4:1080", "нормализация и в легаси");
+  assert.ok(parseProxyUrl("socks4://1.2.3.4:1080").error, "socks4 не поддержан");
+  assert.ok(parseProxyUrl("ftp://1.2.3.4:21").error);
   assert.equal(parseProxyUrl("http://1.2.3.4:8080").url?.toString(), "http://1.2.3.4:8080/");
   assert.equal(parseProxyUrl("1.2.3.4:8080").url?.toString(), "http://1.2.3.4:8080/");
 }
@@ -166,6 +183,25 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
     classifyProxyProbe({ error: Object.assign(new Error("headers timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" }) }),
     "unknown",
   );
+  // Тикет 05: SOCKS-уровневые провалы — тот же CONNECT-класс (выход мёртв).
+  for (const code of [
+    "UND_ERR_SOCKS5",
+    "UND_ERR_SOCKS5_AUTH_FAILED",
+    "UND_ERR_SOCKS5_AUTH_REJECTED",
+    "UND_ERR_SOCKS5_AUTH_METHOD",
+    "UND_ERR_SOCKS5_AUTH_VERSION",
+    "UND_ERR_SOCKS5_VERSION",
+    "UND_ERR_SOCKS5_REPLY_VERSION",
+    "UND_ERR_SOCKS5_ADDR_TYPE",
+    "UND_ERR_SOCKS5_REPLY_1", // динамические REPLY-коды (host unreachable и т.п.)
+    "UND_ERR_SOCKS5_REPLY_4",
+  ]) {
+    assert.equal(classifyProxyProbe({ error: Object.assign(new Error(code), { code }) }), "unreachable", code);
+  }
+  // Таймауты SOCKS-рукопожатия идут без code — узнаём по тексту (проверено на
+  // живой версии: «SOCKS5 connection timeout» / «SOCKS5 authentication timeout»).
+  assert.equal(classifyProxyProbe({ error: new Error("SOCKS5 connection timeout") }), "unreachable");
+  assert.equal(classifyProxyProbe({ error: new Error("SOCKS5 authentication timeout") }), "unreachable");
   // Вложенная причина (fetch-обёртки) тоже распознаётся.
   assert.equal(classifyProxyProbe({ error: Object.assign(new Error("fetch failed"), { cause: econn }) }), "unreachable");
   // AggregateError (happy eyeballs).
@@ -248,12 +284,12 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
 {
   const p = new ProxyPool({
     defaultPath: join(freshDir("inline"), DEFAULT_PROXIES_FILE_NAME),
-    env: { NVIDIA_NIM_PROXIES: "http://a:1, http://b:2, http://a:1, socks5://x:1080, http://c:3" },
+    env: { NVIDIA_NIM_PROXIES: "http://a:1, http://b:2, http://a:1, socks4://x:1080, http://c:3, socks5://s:1080" },
   });
-  assert.deepEqual(p.refresh(), ["http://a:1/", "http://b:2/", "http://c:3/"]);
+  assert.deepEqual(p.refresh(), ["http://a:1/", "http://b:2/", "http://c:3/", "socks5://s:1080"], "socks5 — член пула (тикет 05)");
   const errors = p.parseErrors();
-  assert.equal(errors.length, 1, "socks-запись — ошибка разбора");
-  assert.ok(errors[0].includes("socks5"), errors[0]);
+  assert.equal(errors.length, 1, "socks4 — по-прежнему ошибка разбора");
+  assert.ok(errors[0].includes("socks4"), errors[0]);
 }
 
 /* ── 8. Файл: $ENV/${ENV}-интерполяция, неразрешимые пропускаются с предупреждением ─ */
@@ -327,28 +363,36 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
   }
 }
 
-/* ── 11. Легаси NVIDIA_NIM_PROXY: опечатка и socks видны как ошибка разбора ─ */
+/* ── 11. Легаси NVIDIA_NIM_PROXY: опечатка видна, socks5 принимается (тикет 05) ─ */
 {
-  const warnings: string[] = [];
   const p = new ProxyPool({
-    defaultPath: join(freshDir("legacy-bad"), DEFAULT_PROXIES_FILE_NAME),
+    defaultPath: join(freshDir("legacy-socks"), DEFAULT_PROXIES_FILE_NAME),
     env: { NVIDIA_NIM_PROXY: "socks5://1.2.3.4:1080" },
+  });
+  assert.equal(p.hasSource(), true);
+  assert.deepEqual(p.refresh(), ["socks5://1.2.3.4:1080"], "легаси-одиночка тоже может быть socks5");
+  assert.equal(p.parseErrors().length, 0);
+
+  const warnings: string[] = [];
+  const p2 = new ProxyPool({
+    defaultPath: join(freshDir("legacy-bad"), DEFAULT_PROXIES_FILE_NAME),
+    env: { NVIDIA_NIM_PROXY: "socks4://1.2.3.4:1080" },
     onWarn: (m) => warnings.push(m),
   });
-  assert.equal(p.hasSource(), true, "источник задан — расширение не молчит");
-  assert.deepEqual(p.refresh(), []);
-  assert.equal(p.parseErrors().length, 1);
-  assert.ok(p.parseErrors()[0].includes("socks5"), p.parseErrors()[0]);
+  assert.equal(p2.hasSource(), true, "источник задан — расширение не молчит");
+  assert.deepEqual(p2.refresh(), []);
+  assert.equal(p2.parseErrors().length, 1);
+  assert.ok(p2.parseErrors()[0].includes("socks4"), p2.parseErrors()[0]);
   assert.equal(warnings.length, 1);
-  p.refresh();
+  p2.refresh();
   assert.equal(warnings.length, 1, "предупреждение одно");
 
-  const p2 = new ProxyPool({
+  const p3 = new ProxyPool({
     defaultPath: join(freshDir("legacy-bad2"), DEFAULT_PROXIES_FILE_NAME),
     env: { NVIDIA_NIM_PROXY: "ht tp://опечатка" },
   });
-  assert.deepEqual(p2.refresh(), []);
-  assert.equal(p2.parseErrors().length, 1, "ошибка разбора видна в панели/интро, а не «не настроен»");
+  assert.deepEqual(p3.refresh(), []);
+  assert.equal(p3.parseErrors().length, 1, "ошибка разбора видна в панели/интро, а не «не настроен»");
 }
 
 /* ── 12. Файл по умолчанию отсутствует — не источник, легаси работает ──── */

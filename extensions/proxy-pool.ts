@@ -79,9 +79,17 @@ export interface ParsedProxyEndpoint {
 }
 
 /**
+ * Схемы, которые ProxyAgent ундичи обслуживает нативно: http/https (HTTP
+ * CONNECT) и socks5/socks (Socks5ProxyAgent, experimental, в поставке пи с
+ * undici 8.9 — тикет 05). `socks5h` нормализуется в `socks5`: нативный клиент
+ * всегда отправляет hostname как ATYP DOMAIN (DNS резолвит прокси) — различие
+ * `h` для hostname-целей вырождено.
+ */
+const ALLOWED_PROXY_SCHEMES = new Set(["http:", "https:", "socks5:", "socks:"]);
+
+/**
  * Разбор одного прокси-эндпоинта. Без схемы подразумевается `http://`;
- * схемы кроме `http`/`https` отклоняются (story 40: `socks://` — понятная
- * ошибка разбора, а не загадочный CONNECT-провал ундичи).
+ * неподдержанные схемы (socks4, ftp, …) отклоняются понятной ошибкой.
  */
 export function parseProxyEndpoint(raw: string | undefined): ParsedProxyEndpoint {
   const value = raw?.trim();
@@ -93,7 +101,8 @@ export function parseProxyEndpoint(raw: string | undefined): ParsedProxyEndpoint
   } catch {
     return { error: t("proxyEndpointParseError", { value: redactProxyCredentials(value) }) };
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
+  if (url.protocol === "socks5h:") url.protocol = "socks5:";
+  if (!ALLOWED_PROXY_SCHEMES.has(url.protocol)) {
     return { error: t("proxyEndpointSchemeError", { scheme: url.protocol.replace(/:$/, ""), value: redactProxyCredentials(value) }) };
   }
   if (!url.hostname) {
@@ -426,8 +435,16 @@ export const CONNECT_ERROR_CODES = new Set([
 
 export function isConnectClassError(err: unknown, depth = 0): boolean {
   if (!err || typeof err !== "object" || depth > 4) return false;
-  const record = err as { code?: unknown; cause?: unknown; errors?: unknown };
-  if (typeof record.code === "string" && CONNECT_ERROR_CODES.has(record.code)) return true;
+  const record = err as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+  if (typeof record.code === "string") {
+    if (CONNECT_ERROR_CODES.has(record.code)) return true;
+    // Тикет 05: класс ошибок нативного SOCKS5-клиента ундичи — UND_ERR_SOCKS5*,
+    // включая динамические UND_ERR_SOCKS5_REPLY_<N> (host unreachable и т.п.).
+    if (record.code.startsWith("UND_ERR_SOCKS5")) return true;
+  }
+  // Таймауты SOCKS-рукопожатия ундичи бросает без `code` (проверено на живой
+  // 8.9.0: `new Error('SOCKS5 connection timeout')`) — узнаём по тексту.
+  if (typeof record.message === "string" && /^SOCKS5 (?:connection|authentication) timeout$/.test(record.message)) return true;
   if (record.cause && isConnectClassError(record.cause, depth + 1)) return true;
   if (Array.isArray(record.errors) && record.errors.some((e) => isConnectClassError(e, depth + 1))) return true;
   return false;
