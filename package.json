@@ -1,6 +1,6 @@
 {
   "name": "pi-nvidia-plus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi extension that improves the built-in nvidia provider in place: thinking-level control, up-to-date model catalog, request normalization, per-provider proxy, key rotation and 429/5xx diagnostics",
   "type": "module",
   "license": "MIT",
