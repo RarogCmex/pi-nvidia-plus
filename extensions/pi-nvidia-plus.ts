@@ -60,6 +60,7 @@ import {
   type ProxyProbeEndpoint,
 } from "./proxy-pool.ts";
 import { classifyKeyProbeStatus, keyCheckUnknownSample, type KeyCheckOutcome } from "./key-check.ts";
+import { isTruncatedStreamError } from "./stream-errors.ts";
 import { SessionMetrics } from "./metrics.ts";
 import { t } from "./i18n.ts";
 import { completeArgs, formatCommandLine, nvidiaPlusArgSuggestions, nvidiaPlusCommands, setDynamicPinIds } from "./commands.ts";
@@ -84,7 +85,9 @@ const metrics = new SessionMetrics();
 
 /** Компактная сводка метрик для команд; пустую сессию не рябит. */
 function metricsSummary(): string {
-  if (metrics.totalResponses() === 0) return t("metricsNoResponses");
+  // Обрыв потока виден и без транспортного наблюдения (нет пула/прокси —
+  // ответов в счётчике нет, а message_end всё равно ловит ошибку).
+  if (metrics.totalResponses() === 0 && metrics.truncatedStreams === 0) return t("metricsNoResponses");
   const { responses, groups } = metrics.formatParts();
   const groupLabels: Record<string, string> = {
     retries: t("metricsGroupRetries", { n: metrics.retries }),
@@ -93,6 +96,7 @@ function metricsSummary(): string {
     deadKeys: t("metricsGroupDeadKeys", { n: metrics.deadKeys }),
     cooldownWaits: t("metricsGroupCooldownWaits", { n: metrics.cooldownWaits }),
     proxySwitches: t("metricsGroupProxySwitches", { n: metrics.proxySwitches }),
+    truncatedStreams: t("metricsGroupTruncatedStreams", { n: metrics.truncatedStreams }),
   };
   const extra = groups.length > 0 ? `; ${groups.map((g) => groupLabels[g.kind]).join("; ")}` : "";
   return t("metricsSummary", {
@@ -199,6 +203,10 @@ const notifiedDeadResponses = new Set<string>();
 // Диагностика 429/5xx после повторов: не чаще раза в минуту на модель+статус,
 // чтобы ретрай-цикл пи не заваливал пользователя одинаковыми предупреждениями.
 const lastDiagnosticNotify = new Map<string, number>();
+// Обрыв потока без finish_reason (лог 01a0ceb8): тот же дроссель — раз в минуту
+// на модель. Пи ретраит «ended without …» сам, поэтому уведомление приходит
+// только когда повторы исчерпаны; веер субагентов не должен дублировать его.
+const lastTruncatedNotify = new Map<string, number>();
 let lastNvidiaModelId: string | undefined;
 // Дроссель уведомлений о переключении ключей (тикет 25, pi-subagents).
 let lastSwitchNotifyAt = 0;
@@ -932,6 +940,28 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     } else {
       ctx.ui.notify(t("respErrorPlain", { status, modelId, ref }), "warning");
     }
+  });
+
+  // ── Обрыв потока без finish_reason (лог 01a0ceb8) ───────────────────────
+  // NIM обрывает SSE посреди генерации (часто на длинном thinking-выводе):
+  // pi-ai бросает «Stream ended without finish_reason». Пи ретраит её сам
+  // (паттерн «ended without» в его каталоге), поэтому `message_end` с такой
+  // ошибкой означает: повторы исчерпаны, ответ усечён. Транспортный слой тут
+  // бессилен — контент уже у пи, прозрачный повтор удвоил бы вывод. Остаётся
+  // наблюдаемость: счётчик в /nvidia-plus-status, отладочный лог и одно
+  // дросселированное уведомление с подсказкой (уровень мышления / выход прокси).
+  pi.on("message_end", (event, ctx) => {
+    if (ctx.model?.provider !== PROVIDER) return;
+    if (!isTruncatedStreamError(event.message)) return;
+    metrics.truncatedStreams++;
+    const message = event.message as { errorMessage?: string };
+    debug("stream-truncated", `${ctx.model.id}: ${message.errorMessage}`, {});
+    if (!ctx.hasUI) return;
+    const now = Date.now();
+    const last = lastTruncatedNotify.get(ctx.model.id);
+    if (last !== undefined && now - last < 60_000) return;
+    lastTruncatedNotify.set(ctx.model.id, now);
+    ctx.ui.notify(t("streamTruncated", { modelId: ctx.model.id }), "warning");
   });
 
   // ── Обработчики подкоманд (тикет 24): регистрация одной командой ниже ──

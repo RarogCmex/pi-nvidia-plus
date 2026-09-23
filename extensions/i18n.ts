@@ -165,6 +165,10 @@ export const MESSAGES = {
     en: "proxy pin switches: {n}",
     ru: "смен pin прокси: {n}",
   },
+  metricsGroupTruncatedStreams: {
+    en: "truncated streams: {n}",
+    ru: "оборванных потоков: {n}",
+  },
   proxyUndiciNotFound: {
     en: "could not locate pi's undici (bases: {bases})",
     ru: "не удалось найти undici пи (базы: {bases})",
@@ -420,6 +424,12 @@ export const MESSAGES = {
   retryInBandExhausted: {
     en: "NIM overloaded (“{reason}”): {attempts} attempts did not help — returning the error to pi",
     ru: "NIM перегружен («{reason}»): {attempts} попыток не помогли — отдаю ошибку пи",
+  },
+  // Обрыв потока без finish_reason (лог 01a0ceb8): пи сам ретраит «ended
+  // without …», поэтому уведомление приходит только когда повторы исчерпаны.
+  streamTruncated: {
+    en: "NIM ended the stream without finish_reason (model {modelId}) — pi's retries did not help, the response is truncated. Typical causes: gateway timeout on a long thinking output, flaky proxy exit. Try a lower thinking level, another exit (/nvidia-plus proxy), or simply repeat the request.",
+    ru: "NIM оборвал поток без finish_reason (модель {modelId}) — повторы пи не помогли, ответ усечён. Типичные причины: таймаут шлюза на длинном выводе мышления, нестабильный выход прокси. Попробуйте снизить уровень мышления, сменить выход (/nvidia-plus proxy) или просто повторить запрос.",
   },
   retryScheduledOverloaded: {
     en: "NIM 503 (Service temporarily overloaded): retrying transparently (attempt {attempt} of {total}, in {seconds}s)",
