@@ -1,6 +1,10 @@
 # Issue tracker: Local Markdown
 
-Issues and specs for this repo live as markdown files in `.scratch/`.
+Issues and specs for this repo live as markdown files in `.scratch/` — a local,
+gitignored working directory that is deliberately **not published**. The notes
+carry maintainer-side operational detail (test endpoints, where credentials are
+kept, per-ticket process state) that does not belong in a public repository.
+Design evidence worth publishing lives in [`research/`](../../research/) instead.
 
 ## Conventions
 

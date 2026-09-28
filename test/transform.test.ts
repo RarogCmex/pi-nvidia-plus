@@ -2,8 +2,8 @@
  * Тесты шва B: чистая трансформация запроса (extensions/transform.ts).
  * Запуск: node test/transform.test.ts
  *
- * Источник истины — таблица маппингов из `.scratch/pi-nvidia-plus/spec.md`
- * (подтверждена живыми пробами тикета 05) и пользовательская история №19.
+ * Источник истины — таблица маппингов из `research/03-thinking-mappings.md`
+ * (подтверждена живыми пробами) и пользовательская история №19.
  */
 import assert from "node:assert/strict";
 import { transformRequest, thinkingPlan, type Payload } from "../extensions/transform.ts";

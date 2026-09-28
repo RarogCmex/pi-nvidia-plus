@@ -1,7 +1,7 @@
 /**
  * pi-nvidia-plus — спайк тикета 05 (архитектура D2: хук-онли, без registerProvider).
  *
- * Проверяет чек-лист `.scratch/pi-nvidia-plus/issues/05-architecture-decision.md`:
+ * Проверяет чек-лист архитектурного решения (тикет 05, архитектура D2):
  *  1) оверрайды в формате пи (`reasoning` + `thinkingLevelMap`) проявляют уровни
  *     мышления в UI — данные в `overrides/models.json`, применяются командой
  *     `/nvidia-plus-apply`;

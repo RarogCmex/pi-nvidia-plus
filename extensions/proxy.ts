@@ -9,7 +9,7 @@
  * диагностику 429/5xx, которую не видно хуку `after_provider_response`
  * (он стреляет только после успешного ретрай-цикла).
  *
- * Референс: `.scratch/pi-nvidia-plus/issues/04-proxy-mechanics.md` (вариант A).
+ * Референс: `research/04-proxy-mechanics.md` (вариант A).
  */
 import { KeyRotator, maskKey, type RotationRequest } from "./keys.ts";
 import { t } from "./i18n.ts";
