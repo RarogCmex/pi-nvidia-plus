@@ -1,9 +1,17 @@
 {
-  "name": "pi-nvidia-plus",
+  "name": "@rarogcmex/pi-nvidia-plus",
   "version": "0.2.0",
   "description": "Pi extension that improves the built-in nvidia provider in place: thinking-level control, up-to-date model catalog, request normalization, per-provider proxy, key rotation and 429/5xx diagnostics",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RarogCmex/pi-nvidia-plus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RarogCmex/pi-nvidia-plus/issues"
+  },
+  "homepage": "https://github.com/RarogCmex/pi-nvidia-plus#readme",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -20,6 +28,12 @@
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "typecheck": "tsc -p tsconfig.typecheck.json",
+    "check": "npm run typecheck && npm test",
+    "acceptance:proxy-pool": "node scripts/proxy-pool-acceptance.mjs"
+  },
   "pi": {
     "extensions": [
       "extensions/pi-nvidia-plus.ts"
@@ -28,12 +42,10 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
-  "scripts": {
-    "test": "node scripts/run-tests.mjs",
-    "typecheck": "tsc -p tsconfig.typecheck.json",
-    "acceptance:proxy-pool": "node scripts/proxy-pool-acceptance.mjs"
-  },
   "devDependencies": {
     "undici": "^8.10.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
