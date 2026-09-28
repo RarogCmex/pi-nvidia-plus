@@ -24,11 +24,10 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
 Requirements: **Node ≥ 22.6** (uses native TypeScript stripping), [pi-coding-agent](https://github.com/earendil-works/pi-coding-agent) installed.
 
 ```bash
-# from npm (when published)
-pi install pi-nvidia-plus
+pi install git:github.com/RarogCmex/pi-nvidia-plus@main
 
-# from source
-git clone https://github.com/<you>/pi-nvidia-plus.git
+# from source (for development)
+git clone git@github.com:RarogCmex/pi-nvidia-plus.git
 cd pi-nvidia-plus
 npm install   # only for dev (tests / typecheck)
 ```

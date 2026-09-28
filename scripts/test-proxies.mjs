@@ -342,8 +342,9 @@ async function main() {
   }
 
   // Сохраняем результаты в JSON
-  const outputPath = "/Users/rarogcmex/pi-plugins/pi-nvidia-plus/test-results/proxy-ab-test-" + Date.now() + ".json";
-  mkdirSync("/Users/rarogcmex/pi-plugins/pi-nvidia-plus/test-results", { recursive: true });
+  const outDir = new URL("../test-results/", import.meta.url).pathname;
+  const outputPath = outDir + "proxy-ab-test-" + Date.now() + ".json";
+  mkdirSync(outDir, { recursive: true });
   writeFileSync(outputPath, JSON.stringify({
     timestamp: new Date().toISOString(),
     model: TEST_MODEL,
