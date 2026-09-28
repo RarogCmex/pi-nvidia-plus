@@ -26,12 +26,12 @@ import { KeyRotator } from "../extensions/keys.ts";
 {
   assert.deepEqual(parseProxyUrl(undefined), {});
   assert.deepEqual(parseProxyUrl("   "), {});
-  const ok = parseProxyUrl("http://192.168.88.248:8870");
-  assert.equal(ok.url?.toString(), "http://192.168.88.248:8870/");
+  const ok = parseProxyUrl("http://203.0.113.1:8870");
+  assert.equal(ok.url?.toString(), "http://203.0.113.1:8870/");
   assert.equal(ok.error, undefined);
   // Без схемы — подразумевается http
-  const bare = parseProxyUrl("192.168.88.248:8870");
-  assert.equal(bare.url?.toString(), "http://192.168.88.248:8870/");
+  const bare = parseProxyUrl("203.0.113.1:8870");
+  assert.equal(bare.url?.toString(), "http://203.0.113.1:8870/");
   const bad = parseProxyUrl("ht tp://некорректный");
   assert.equal(bad.url, undefined);
   assert.ok(bad.error?.includes("NVIDIA_NIM_PROXY"), "ошибка не называет переменную");
@@ -99,10 +99,10 @@ import { KeyRotator } from "../extensions/keys.ts";
 
 // 6. describeProxyFailure — понятная ошибка с адресом прокси
 {
-  const err = new Error("connect ECONNREFUSED 192.168.88.248:8870");
+  const err = new Error("connect ECONNREFUSED 203.0.113.1:8870");
   (err as NodeJS.ErrnoException).code = "ECONNREFUSED";
-  const msg = describeProxyFailure("http://192.168.88.248:8870/", err);
-  assert.ok(msg.includes("192.168.88.248:8870"), msg);
+  const msg = describeProxyFailure("http://203.0.113.1:8870/", err);
+  assert.ok(msg.includes("203.0.113.1:8870"), msg);
   assert.ok(msg.includes("ECONNREFUSED"), msg);
   assert.ok(msg.includes("NVIDIA_NIM_PROXY"), msg);
 }
@@ -233,19 +233,19 @@ function makeTarget(name: string) {
   const dispatcher = createSelectiveDispatcher({
     nvidia,
     fallback,
-    proxyUrl: "http://192.168.88.248:8870/",
+    proxyUrl: "http://203.0.113.1:8870/",
   });
   const errors: Error[] = [];
   const handler = { onResponseError(_controller: unknown, err: Error) { errors.push(err); } };
   dispatcher.dispatch({ origin: NVIDIA_ORIGIN }, handler);
 
-  const conn = new Error("connect ECONNREFUSED 192.168.88.248:8870") as NodeJS.ErrnoException;
+  const conn = new Error("connect ECONNREFUSED 203.0.113.1:8870") as NodeJS.ErrnoException;
   conn.code = "ECONNREFUSED";
   handler.onResponseError(null, conn);
   assert.equal(errors.length, 1);
   // Локаль-независимый идентификатор: текст сообщения локализован (тикет 17).
   assert.ok(errors[0].message.includes("NVIDIA_NIM_PROXY"), errors[0].message);
-  assert.ok(errors[0].message.includes("192.168.88.248:8870"), errors[0].message);
+  assert.ok(errors[0].message.includes("203.0.113.1:8870"), errors[0].message);
   assert.equal((errors[0] as NodeJS.ErrnoException).code, "ECONNREFUSED", "код потерян");
   assert.strictEqual(errors[0].cause, conn, "причина потеряна");
 }
@@ -255,7 +255,7 @@ function makeTarget(name: string) {
   const dispatcher = createSelectiveDispatcher({
     nvidia: makeTarget("proxy"),
     fallback: makeTarget("prev"),
-    proxyUrl: "http://192.168.88.248:8870/",
+    proxyUrl: "http://203.0.113.1:8870/",
   });
   const errors: unknown[] = [];
   const legacy = { onError(err: unknown) { errors.push(err); } };
@@ -277,7 +277,7 @@ function makeTarget(name: string) {
   const dispatcher = createSelectiveDispatcher({
     nvidia: makeTarget("proxy"),
     fallback: makeTarget("prev"),
-    proxyUrl: "http://192.168.88.248:8870/",
+    proxyUrl: "http://203.0.113.1:8870/",
     onProxyError: (message) => proxyErrors.push(message),
   });
   const handler = { onResponseError(_c: unknown, _err: Error) {} };
@@ -302,7 +302,7 @@ function makeTarget(name: string) {
       setGlobalDispatcher: (d) => { current = d; setCalls.push(d); },
       createProxyAgent: () => proxyAgent,
     },
-    { proxyUrl: new URL("http://192.168.88.248:8870/") },
+    { proxyUrl: new URL("http://203.0.113.1:8870/") },
   );
   assert.equal(result1.installed, true);
   assert.equal(result1.already, false);
@@ -317,7 +317,7 @@ function makeTarget(name: string) {
       setGlobalDispatcher: (d) => { current = d; setCalls.push(d); },
       createProxyAgent: (url) => makeTarget(`agent:${url}`),
     },
-    { proxyUrl: new URL("http://192.168.88.248:8870/") },
+    { proxyUrl: new URL("http://203.0.113.1:8870/") },
   );
   assert.equal(result2.already, true);
   assert.equal(result2.installed, false);
@@ -502,7 +502,7 @@ function makeTarget(name: string) {
       },
     },
     {
-      proxyUrl: new URL("http://192.168.88.248:8870/"),
+      proxyUrl: new URL("http://203.0.113.1:8870/"),
       retry: { maxRetries: 3, minDelayMs: 10, maxDelayMs: 100 },
     },
   );
@@ -572,7 +572,7 @@ function makeTarget(name: string) {
       createRetryAgent: () => retryTarget,
     },
     {
-      proxyUrl: new URL("http://192.168.88.248:8870/"),
+      proxyUrl: new URL("http://203.0.113.1:8870/"),
       retry: { maxRetries: 3, minDelayMs: 10, maxDelayMs: 100 },
       rotation: {
         rotator: new KeyRotator(),

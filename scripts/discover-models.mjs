@@ -9,7 +9,7 @@
  * 
  * Environment variables:
  *   NVIDIA_API_KEY - API key for authentication (optional, but recommended)
- *   NVIDIA_NIM_PROXY - Proxy URL (e.g., http://192.168.88.248:8870)
+ *   NVIDIA_NIM_PROXY - Proxy URL (e.g., http://127.0.0.1:8870)
  *   NVIDIA_NIM_PROXIES - Comma-separated list of proxy URLs
  *   NVIDIA_NIM_PROXIES_FILE - Path to proxy pool file
  */

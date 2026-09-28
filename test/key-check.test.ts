@@ -24,8 +24,8 @@ import { classifyKeyProbeStatus, keyCheckUnknownSample } from "../extensions/key
   assert.equal(keyCheckUnknownSample([]), undefined);
   assert.equal(keyCheckUnknownSample([{ status: 451 }]), "HTTP 451");
   assert.equal(
-    keyCheckUnknownSample([{ error: "Error: connect EHOSTUNREACH 192.168.88.248:8870" }]),
-    "Error: connect EHOSTUNREACH 192.168.88.248:8870",
+    keyCheckUnknownSample([{ error: "Error: connect EHOSTUNREACH 203.0.113.1:8870" }]),
+    "Error: connect EHOSTUNREACH 203.0.113.1:8870",
   );
   assert.equal(
     keyCheckUnknownSample([{ error: "boom nvapi-super-secret-key-zzzz" }])?.includes("nvapi-super-secret"),
