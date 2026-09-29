@@ -450,16 +450,16 @@ export const MESSAGES = {
 
   // ── Ротация ключей (тикет 15) ────────────────────────────────────────
   rotationIntro: {
-    en: "pi-nvidia-plus: NIM key rotation {state} — pool {source}: {count} keys + pi key first. Status: /nvidia-plus-keys",
-    ru: "pi-nvidia-plus: ротация ключей NIM {state} — пул {source}: {count} кл. + ключ пи первым. Статус: /nvidia-plus-keys",
+    en: "pi-nvidia-plus: NIM key rotation {state} — pool {source}: {count} keys + pi key first. Status: /nvidia-plus keys",
+    ru: "pi-nvidia-plus: ротация ключей NIM {state} — пул {source}: {count} кл. + ключ пи первым. Статус: /nvidia-plus keys",
   },
   rotationStateOn: {
     en: "on",
     ru: "вкл",
   },
   rotationStateOff: {
-    en: "off (enable: /nvidia-plus-keys on)",
-    ru: "выкл (включить: /nvidia-plus-keys on)",
+    en: "off (enable: /nvidia-plus keys on)",
+    ru: "выкл (включить: /nvidia-plus keys on)",
   },
   rotationSwitch: {
     en: "NIM {status}: key {from} exhausted — switching to key {to} (pool rotation)",
@@ -470,8 +470,8 @@ export const MESSAGES = {
     ru: "NIM {status}: ключ {key} мёртв — исключён из ротации до конца сессии",
   },
   rotationExhausted: {
-    en: "NIM {status}: two rotation rounds ({attempts} attempts) did not help — returning the error to pi. Pool status: /nvidia-plus-keys",
-    ru: "NIM {status}: два круга ротации ({attempts} попыток) не помогли — отдаю ошибку пи. Статус пула: /nvidia-plus-keys",
+    en: "NIM {status}: two rotation rounds ({attempts} attempts) did not help — returning the error to pi. Pool status: /nvidia-plus keys",
+    ru: "NIM {status}: два круга ротации ({attempts} попыток) не помогли — отдаю ошибку пи. Статус пула: /nvidia-plus keys",
   },
   rotationCooldownWait: {
     en: "NIM 429: all pool keys are in cooldown — waiting {seconds}s (interrupt with Esc)",
@@ -630,8 +630,8 @@ export const MESSAGES = {
     ru: "pi-nvidia-plus: автоприменены {overrides} modelOverrides + {models} models (леджер: nvidia-plus-models.json)",
   },
   applyConflictSkipped: {
-    en: 'pi-nvidia-plus: skipped {providerId}/{modelId} ({kind}) — {reason}; run "/nvidia-plus-apply force" to overwrite',
-    ru: 'pi-nvidia-plus: пропущено {providerId}/{modelId} ({kind}) — {reason}; выполните "/nvidia-plus-apply force" для перезаписи',
+    en: 'pi-nvidia-plus: skipped {providerId}/{modelId} ({kind}) — {reason}; run "/nvidia-plus apply force" to overwrite',
+    ru: 'pi-nvidia-plus: пропущено {providerId}/{modelId} ({kind}) — {reason}; выполните "/nvidia-plus apply force" для перезаписи',
   },
   applyAutoFailed: {
     en: "pi-nvidia-plus: auto-apply failed — {error}",

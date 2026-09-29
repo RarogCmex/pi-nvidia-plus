@@ -44,7 +44,7 @@ export interface OwnedProviderState {
 export interface OwnedState {
   version: 1;
   appliedAt: string;
-  /** `false` — автоприменение выключено (например, после `/nvidia-plus-rollback`). */
+  /** `false` — автоприменение выключено (например, после `/nvidia-plus rollback`). */
   enabled?: boolean;
   providers: Record<string, OwnedProviderState>;
 }

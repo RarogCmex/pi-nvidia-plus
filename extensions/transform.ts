@@ -51,7 +51,7 @@ function minimaxThinkingMode(level: string): string {
   return "adaptive"; // minimal / low / medium
 }
 
-/** Что хук инжектит для модели+уровня (для статус-строки и /nvidia-plus-status). */
+/** Что хук инжектит для модели+уровня (для статус-строки и /nvidia-plus status). */
 export function thinkingPlan(modelId: string, level: string): string | undefined {
   if (GEMMA4.test(modelId)) {
     return "chat_template_kwargs.enable_thinking=false (модель виснет в режиме мышления)";

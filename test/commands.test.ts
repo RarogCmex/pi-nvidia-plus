@@ -149,6 +149,9 @@ function values(prefix: string): string[] | null {
 //    и CombinedAutocompleteProvider тогда отдаёт файлы, не getArgumentCompletions.
 //    nvidiaPlusArgSuggestions перехватывает `/nvidia-plus …` целиком.
 {
+  // Форма с дефисом намеренно НЕ команда: пользовательские тексты советуют
+  // `/nvidia-plus keys`, а этот assert страхует, что дефисный вариант так и не
+  // распознаётся (иначе pi начал бы перехватывать чужие префиксы).
   assert.equal(nvidiaPlusArgSuggestions("/nvidia-plus-keys"), null);
   assert.equal(nvidiaPlusArgSuggestions("/nvidia-plu"), null, "неполное имя — встроенному провайдеру");
   assert.equal(nvidiaPlusArgSuggestions("/model "), null);
