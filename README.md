@@ -1,38 +1,101 @@
 # pi-nvidia-plus
 
-Pi extension that improves the built-in `nvidia` provider **in place** — no duplicate provider, no forking of the streaming pipeline. You keep selecting `nvidia/...` models with your existing API key; the extension only fixes what the built-in provider can't do.
+Pi extension that improves the built-in `nvidia` provider **in place** — no duplicate provider, no forking of the streaming pipeline. You keep selecting `nvidia/...` models with the NVIDIA API key pi already uses; the extension only fixes what the built-in provider can't do.
+
+[pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`) is the coding agent this extension plugs into. It ships a built-in `nvidia` provider for NVIDIA NIM (`https://integrate.api.nvidia.com`); this extension hooks that provider rather than replacing it, so pi's own auth, streaming, retries and cost attribution are untouched.
+
+> ⚠️ **Two families this extension was built around are now end-of-life on NIM.** DeepSeek V4 (`deepseek-ai/deepseek-v4-flash-0731`, `-pro-0813`) was deprecated 2026-09-19 and is unsupported after 2026-09-21; MiniMax M3 (`minimaxai/minimax-m3`) returns 410. The thinking mappings for both are still shipped, but selecting either model produces a "reported dead" warning. See [Limitations](#limitations).
 
 > 🇷🇺 Русскоязычным пользователям: все сообщения расширения двуязычны (см. `PI_NVIDIA_PLUS_LANG` ниже). Документация ниже — на английском, как принято для GitHub; вопросы можно задавать на любом языке.
 
 ## What it fixes
 
-1. **Thinking control (P0).** The built-in catalog marks almost all models as `supportsReasoningEffort: false`, so `--thinking high` is silently dropped. This extension injects thinking parameters per model family via `before_provider_request`:
-   - DeepSeek V4 → `chat_template_kwargs.thinking` / `reasoning_effort`
-   - GLM → `enable_thinking` / `clear_thinking` + `reasoning_effort`
-   - MiniMax M3 → `thinking_mode: disabled | adaptive | enabled`
+1. **Thinking control.** The built-in catalog marks almost all models as `supportsReasoningEffort: false`, so `--thinking high` is silently dropped. This extension injects thinking parameters per model family via `before_provider_request`:
    - Nemotron 3.x → `chat_template_kwargs.enable_thinking` (+ `low_effort`)
+   - GLM (`z-ai/glm*`) → `enable_thinking` / `clear_thinking` + `reasoning_effort`
+   - DeepSeek V4 → `chat_template_kwargs.thinking` / `reasoning_effort` *(family is EOL on NIM — kept for the ids that still answer)*
+   - MiniMax M3 → `thinking_mode: disabled | adaptive | enabled` *(id returns 410)*
+   - Gemma 4 → thinking is **force-disabled at every level** (see [Limitations](#limitations))
    - Explicit **off** really disables thinking where the model thinks by default.
-2. **Stale catalog (P1).** Dead models (HTTP 410/404 on the live NIM endpoint) produce warnings instead of silent failures; missing live models can be added via `/nvidia-plus discover`.
-3. **Request normalization (P2).** Text content-arrays are flattened to strings for older models; a default `max_tokens` is set when the model requires it.
-4. **Per-provider proxy pool (P3).** `NVIDIA_NIM_PROXIES` (or `NVIDIA_NIM_PROXIES_FILE`, default `~/.pi/agent/nvidia-proxies.json`, legacy single `NVIDIA_NIM_PROXY`) route only `https://integrate.api.nvidia.com` through your exits; other providers are untouched. Each request pins one exit for its whole key/retry circle; a dead CONNECT goes to a 60 s quarantine, and `/nvidia-plus proxy check` measures latency and pins the fastest reachable exit.
-5. **Diagnostics (P4).** `retry-after` and request IDs for 429/5xx are surfaced during pi's retry pauses.
-6. **Transparent in-band retry (P4).** NIM sometimes answers an overloaded request with **HTTP 200** whose SSE stream carries `data: {"error":{"message":"Service temporarily overloaded"}}`. Both status-keyed layers (transport 429/5xx retry, key rotation) miss it, so it surfaces as a `stopReason: error` turn that pi-retry makes visible to the model. The extension sniffs the first SSE event and transparently re-issues the request (3 attempts, backoff), so pi and the model never see it. On exhaustion pi gets the original error unchanged. Toggle with `NVIDIA_NIM_TRANSPORT_RETRY`.
-7. **Truncated-stream detection (P4).** NIM can drop an SSE stream mid-generation (typically on long thinking output or a gateway timeout): the stream ends without a `finish_reason` chunk and pi-ai throws `Stream ended without finish_reason`. pi retries this itself, so the extension only acts when retries are exhausted and the truncated message is finalized — it counts such streams in `/nvidia-plus status` and shows one throttled warning per minute with hints (lower thinking level, switch proxy exit, retry).
+2. **Stale catalog.** Dead models (HTTP 410/404 on the live NIM endpoint) produce warnings instead of silent failures; missing live models can be added via `/nvidia-plus discover`.
+3. **Request normalization.** Text content-arrays are flattened to strings for older models; a default `max_tokens` is set when the model requires it.
+4. **Per-provider proxy pool.** `NVIDIA_NIM_PROXIES` (or `NVIDIA_NIM_PROXIES_FILE`, default `~/.pi/agent/nvidia-proxies.json`, legacy single `NVIDIA_NIM_PROXY`) route only `https://integrate.api.nvidia.com` through your exits; other providers are untouched. Each request pins one exit for its whole key/retry circle; a dead CONNECT goes to a 60 s quarantine, and `/nvidia-plus proxy check` measures latency and pins the fastest reachable exit.
+5. **Diagnostics.** `retry-after` and request IDs for 429/5xx are surfaced during pi's retry pauses.
+6. **Transparent in-band retry.** NIM sometimes answers an overloaded request with **HTTP 200** whose SSE stream carries `data: {"error":{"message":"Service temporarily overloaded"}}`. Both status-keyed layers (transport 429/5xx retry, key rotation) miss it, so it surfaces as a `stopReason: error` turn that pi's own retry layer hands straight to the model. The extension sniffs the first SSE event and transparently re-issues the request (3 retries, 5 s→30 s backoff), so pi and the model never see it. On exhaustion pi gets the original error unchanged. Toggle with `NVIDIA_NIM_TRANSPORT_RETRY`.
+7. **Truncated-stream detection.** NIM can drop an SSE stream mid-generation (typically on long thinking output or a gateway timeout): the stream ends without a `finish_reason` chunk and pi-ai throws `Stream ended without finish_reason`. pi retries this itself, so the extension only acts when retries are exhausted and the truncated message is finalized — it counts such streams in `/nvidia-plus status` and shows one throttled warning per minute with hints (lower thinking level, switch proxy exit, retry).
 
 ## Installation
 
-Requirements: **Node ≥ 22.6** (uses native TypeScript stripping), [pi-coding-agent](https://github.com/earendil-works/pi-coding-agent) installed.
+Requirements: **Node ≥ 22.6** (uses native TypeScript stripping), [pi-coding-agent](https://github.com/earendil-works/pi) installed.
 
 ```bash
 pi install git:github.com/RarogCmex/pi-nvidia-plus@main
 
 # from source (for development)
-git clone git@github.com:RarogCmex/pi-nvidia-plus.git
+git clone https://github.com/RarogCmex/pi-nvidia-plus.git
 cd pi-nvidia-plus
-npm install   # only for dev (tests / typecheck)
+node scripts/link-pi.mjs   # only for dev (tests / typecheck)
 ```
 
 The extension self-applies its model overrides on first session start (into `~/.pi/agent/models.json`, ledger in `~/.pi/agent/nvidia-plus-models.json`). It never overwrites your manual edits without `force`.
+
+## Authentication
+
+The extension registers **no provider and no credential of its own** — it uses
+whatever pi's built-in `nvidia` provider already uses:
+
+- `NVIDIA_API_KEY=nvapi-…` in the environment, or
+- pi's stored credential: `/login` inside pi, then pick `nvidia`; pi keeps it in
+  `~/.pi/agent/auth.json`.
+
+Keys are issued at <https://build.nvidia.com> (NVIDIA API Keys). Nothing in this
+extension reads, writes or logs the key value; the optional key **pool** below is
+a separate, read-only file you maintain yourself.
+
+### Key pool (optional)
+
+`NVIDIA_NIM_KEYS` / `NVIDIA_NIM_KEYS_FILE` (default `~/.pi/agent/nvidia-keys.json`)
+add extra `nvapi-…` keys that the extension rotates to when the active key hits a
+429 bucket or a 401/403. Your pi credential is always first in the ring. The
+extension only reads the file. See [Configuration](#configuration).
+
+## Models
+
+The extension does not add a model list of its own — pi's built-in `nvidia`
+catalog stays authoritative. Two things are layered on top:
+
+**1. Metadata overrides** (`overrides/models.json`, applied to
+`~/.pi/agent/models.json` by `/nvidia-plus apply`, automatically on session
+start). Ten ids carry `reasoning: true` plus a `thinkingLevelMap`, which is what
+makes pi's `--thinking <level>` selector reachable for them at all:
+
+| id | pi level → injected |
+|---|---|
+| `nvidia/nemotron-3-super-120b-a12b` | `off`→off · `minimal`/`low`→low · `medium`…`max`→on |
+| `nvidia/nemotron-3-ultra-550b-a55b` | same |
+| `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | same |
+| `nvidia/nemotron-3.5-lightning-30b-a3b` | same |
+| `moonshotai/kimi-k3` | same |
+| `z-ai/glm-5.3`, `z-ai/glm-5.3-flash` | same |
+| `openai/gpt-oss-20b` | native `reasoning_effort`: `off`→omitted · `minimal`→low · `xhigh`/`max`→high |
+| `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
+| `deepseek-ai/deepseek-v4-flash-0731` | `supportsReasoningEffort: true` — **id is EOL on NIM**, the override is kept for the ids that still answer |
+
+**2. Per-request injection** (`extensions/transform.ts`), which covers families
+rather than individual ids — so a model pi has never seen still gets the right
+wire parameters if its id matches a family prefix:
+
+| family (id prefix) | injected | verified |
+|---|---|---|
+| `nvidia/nemotron-3*`, `nvidia/nemotron-3.5*` | `chat_template_kwargs.enable_thinking`, `low_effort` at `minimal`/`low` | live probes |
+| `z-ai/glm*` | `enable_thinking` + `clear_thinking`, `reasoning_effort` (`high`/`max`) | **hypothesis** — extrapolated from the family, not probed per id |
+| `deepseek-ai/deepseek-v4*` | `chat_template_kwargs.thinking` + `reasoning_effort` | probed 2026-08-28 (family now EOL) |
+| `minimaxai/minimax-m3` | `thinking_mode: disabled \| adaptive \| enabled` | id returns 410 |
+| `google/gemma-4*` | `enable_thinking=false` at **every** level | live probes — see Limitations |
+
+`/nvidia-plus status` prints the exact injection for the currently selected
+model and level. `/nvidia-plus discover` adds live ids that pi's catalog is
+missing (it never adds an id the dead-model list already knows about).
 
 ## Usage
 
@@ -92,7 +155,7 @@ Exactly one source wins — `NVIDIA_NIM_PROXIES` > `NVIDIA_NIM_PROXIES_FILE` > t
 
 Per request to NIM the ring picks one **pin** — a sticky exit for the whole inner key/retry circle. A dead CONNECT (including SOCKS handshake/auth failures) goes to a 60 s **quarantine** (TTL, not a permanent denylist); 429/401/403/5xx and in-band overload never rotate the proxy (those are key/transport buckets). `/nvidia-plus proxy check` measures latency on a cheap `GET /v1/models` through each exit and pins the fastest reachable one. In notifications, status, logs and the shared state file every exit appears only as its display identity `host:port` — credentials are never written.
 
-**SOCKS5** is served by undici's native `Socks5ProxyAgent` (bundled with pi ≥ 8.9; experimental — Node prints one `ExperimentalWarning` per process). `socks5h://` is normalized to `socks5://`: the native client always hands the hostname to the proxy (remote DNS), so the `h` distinction is degenerate for NIM. `socks4://` and other schemes are rejected with a parse error. On an older pi whose undici lacks `Socks5ProxyAgent`, a socks entry gets a clear error and is quarantined — the rest of the pool keeps working.
+**SOCKS5** is served by undici's native `Socks5ProxyAgent`, which needs **undici ≥ 8.9** — the copy pi bundles decides whether it is available (pi 0.87.1 bundles undici 8.10.2). It is experimental: Node prints one `ExperimentalWarning` per process. `socks5h://` is normalized to `socks5://`: the native client always hands the hostname to the proxy (remote DNS), so the `h` distinction is degenerate for NIM. `socks4://` and other schemes are rejected with a parse error. On an older pi whose undici lacks `Socks5ProxyAgent`, a socks entry gets a clear error and is quarantined — the rest of the pool keeps working.
 
 ## How it works
 
@@ -101,23 +164,72 @@ Per request to NIM the ring picks one **pin** — a sticky exit for the whole in
 - **Behavior as code** — `before_provider_request` (thinking injection, normalization); a selective global dispatcher (proxy, transparent retry, key rotation, observability).
 - **Metadata as data** — overrides in `overrides/models.json` (pi's `models.json` format), applied to `~/.pi/agent/models.json` by the extension's command; the extension owns only its own IDs.
 
-See `docs/adr/` for architecture decisions.
+The design evidence behind these choices — pi's provider surface, a live audit
+of the NIM catalog, the thinking-format mappings per family, and the proxy
+mechanics — is written up in [`research/`](research/); start at
+[`research/README.md`](research/README.md).
+
+## Limitations
+
+- **Dead models warn, they do not disappear.** `DEAD_MODELS`
+  (`extensions/pi-nvidia-plus.ts`) is a point-in-time audit (probes of
+  2026-08-26 and 2026-09-18). NIM retires ids without notice, so the list is
+  always behind reality; selecting a listed id produces a warning naming the
+  probe evidence, and an id that died *after* the audit fails the ordinary way.
+  Both headline thinking families this extension was built for are on that list
+  (DeepSeek V4, MiniMax M3).
+- **Gemma 4 cannot think.** In thinking mode `google/gemma-4*` hangs — no
+  response within the 120 s header timeout at any of plain / `reasoning_effort`
+  / `enable_thinking=true`; with `chat_template_kwargs.enable_thinking=false` it
+  answers in ~2 s. The extension therefore force-disables thinking at every
+  level, including `--thinking high`. That is deliberate: the alternative is an
+  unusable model.
+- **GLM mappings are unverified hypotheses.** `z-ai/glm*` injection is
+  extrapolated from the family, not probed id by id. If an upstream rejects
+  `chat_template_kwargs`, the request 400s.
+- **Billing is out of scope.** The extension does not read, estimate or report
+  NIM cost; pi's own cost accounting for the `nvidia` provider is untouched.
+- **Overrides are per-id, not per-family.** An id absent from
+  `overrides/models.json` still gets request-level injection if its family
+  matches, but pi's UI will not offer a thinking selector for it until the
+  override adds `reasoning: true` + `thinkingLevelMap`.
+- **Side files in `~/.pi/agent/`.** `nvidia-plus-models.json` (the ownership
+  ledger), `nvidia-plus-discovered.json` (discover results),
+  `models.json.bak-pi-nvidia-plus` (pre-apply backup), `nvidia-keys-state.json`
+  and `nvidia-proxies-state.json` (cross-process shared state). `/nvidia-plus
+  rollback` removes the extension's `models.json` entries using the ledger.
 
 ## Development
 
 ```bash
-npm test        # cross-platform runner (Linux / macOS / Windows)
+npm test                       # cross-platform runner (Linux / macOS / Windows)
 npm run typecheck
+npm run check                  # both
 ```
 
-Typecheck needs pi's types once (outside git):
+Opt-in scripts — each spends real NIM quota, so none of them run under `check`:
 
 ```bash
-mkdir -p node_modules/@earendil-works
-ln -sfn ~/.local/lib/node_modules/@earendil-works/pi-coding-agent node_modules/@earendil-works/pi-coding-agent
+npm run acceptance:proxy-pool  # drives the proxy ring against real exits
+npm run discover               # live GET /v1/models outside a pi session
+NVIDIA_API_KEY=nvapi-… PROXY_AB_LIST='[{"name":"a","url":"http://host:1080","type":"…","country":"…","asn":"…"}]' \
+  npm run bench:proxies        # A/B the same probe set across several exits
 ```
 
-On Windows use a directory junction instead of `ln -sfn`.
+Tests and typecheck need pi's own types, which are not dependencies of this
+package (pi aliases them at load time). Link your global pi install once:
+
+```bash
+node scripts/link-pi.mjs
+```
+
+The script probes `npm root -g`, `~/.local/lib/node_modules`,
+`/usr/local/lib/node_modules` and the directory the `pi` executable resolves to,
+so npm, nvm, pnpm and user-prefix installs all work; on Windows it creates
+junctions. To point at a specific install:
+`PI_ROOT=/path/to/node_modules node scripts/link-pi.mjs`.
+
+Verified against pi 0.87.1 / Node 26.
 
 ## Compatibility
 

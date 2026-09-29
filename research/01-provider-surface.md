@@ -6,8 +6,12 @@
 в поставке. Живые пробы не требовались (вопрос про код пи).
 
 Обозначения:
-- `PI` = `~/.local/lib/node_modules/@earendil-works/pi-coding-agent`
-- `PIAI` = `$PI/node_modules/@earendil-works/pi-ai`
+- `$PI` = каталог установленного `@earendil-works/pi-coding-agent` (как его
+  найти на своей машине — см. [README.md](README.md) этого каталога)
+- `$PIAI` = `$PI/node_modules/@earendil-works/pi-ai`
+
+Номера строк в цитатах `dist/` — против pi 0.73 и между версиями уезжают;
+долговечная часть цитаты — имя символа.
 
 ---
 

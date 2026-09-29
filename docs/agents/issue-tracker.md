@@ -1,4 +1,4 @@
-# Issue tracker: Local Markdown
+# Issue tracker: local Markdown
 
 Issues and specs for this repo live as markdown files in `.scratch/` — a local,
 gitignored working directory that is deliberately **not published**. The notes
@@ -6,29 +6,24 @@ carry maintainer-side operational detail (test endpoints, where credentials are
 kept, per-ticket process state) that does not belong in a public repository.
 Design evidence worth publishing lives in [`research/`](../../research/) instead.
 
-## Conventions
+## What this means for a reader of the source
+
+Comments in `extensions/` and `test/` cite those work items by number —
+`тикет 15`, `Story 23`, `исследование 03`. **The numbers are not resolvable from
+this repository.** They are provenance markers: each one says "this line exists
+because of a specific piece of investigated work", and the sentence around it
+always carries the actual reason. `исследование NN` / `research NN` *is*
+resolvable — those are the published files in [`research/`](../../research/).
+
+If a comment seems to rest on the number alone, that is a bug in the comment;
+please open an issue rather than guessing.
+
+## Conventions (maintainer-side)
 
 - One feature per directory: `.scratch/<feature-slug>/`
 - The spec is `.scratch/<feature-slug>/spec.md`
-- Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01` — never a single combined tickets file
-- Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
-- Comments and conversation history append to the bottom of the file under a `## Comments` heading
-
-## When a skill says "publish to the issue tracker"
-
-Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).
-
-## When a skill says "fetch the relevant ticket"
-
-Read the file at the referenced path. The user will normally pass the path or the issue number directly.
-
-## Wayfinding operations
-
-Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
-
-- **Map**: `.scratch/<effort>/map.md` — the Notes / Decisions-so-far / Fog body.
-- **Child ticket**: `.scratch/<effort>/issues/NN-<slug>.md`, numbered from `01`, with the question in the body. A `Type:` line records the ticket type (`research`/`prototype`/`grilling`/`task`); a `Status:` line records `claimed`/`resolved`.
-- **Blocking**: a `Blocked by: NN, NN` line near the top. A ticket is unblocked when every file it lists is `resolved`.
-- **Frontier**: scan `.scratch/<effort>/issues/` for files that are open, unblocked, and unclaimed; first by number wins.
-- **Claim**: set `Status: claimed` and save before any work.
-- **Resolve**: append the answer under an `## Answer` heading, set `Status: resolved`, then append a context pointer (gist + link) to the map's Decisions-so-far in `map.md`.
+- Implementation issues are one file per ticket at
+  `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`
+- Triage state is a `Status:` line near the top of each issue file
+  (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`)
+- Comments and conversation history append to the bottom under `## Comments`

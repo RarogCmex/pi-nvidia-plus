@@ -1,19 +1,78 @@
-# pi-nvidia-plus
+# AGENTS.md
 
-Расширение для pi, улучшающее встроенный провайдер `nvidia` на месте
-(управление thinking, актуальный каталог, нормализация запросов,
-индивидуальный прокси, диагностика). Описание и команды — в `README.md`.
+Расширение для pi, улучшающее встроенный провайдер `nvidia` **на месте** —
+без `registerProvider` и без собственного стриминга. Управление thinking,
+актуальность каталога, нормализация запросов, индивидуальный прокси, ротация
+ключей, диагностика. Пользовательская документация и команды — в
+[README.md](README.md); свидетельства, на которых стоят решения, — в
+[research/](research/) (начинать с [research/README.md](research/README.md)).
+Читай их перед изменением каталога, маппингов мышления или хуков.
 
-## Agent skills
+## Структура
 
-### Issue tracker
+- `extensions/pi-nvidia-plus.ts` — входная точка: регистрация команды
+  `/nvidia-plus`, хуки, наблюдатель диспетчера, список мёртвых моделей.
+- `extensions/transform.ts` — чистый шов: трансформация пейлоада
+  (thinking по семействам, нормализация контента, дефолтный `max_tokens`).
+  Без pi и без сети.
+- `extensions/proxy.ts`, `extensions/proxy-pool.ts` — выборочный глобальный
+  диспетчер (только `integrate.api.nvidia.com`), кольцо выходов, карантин,
+  пиннинг, SOCKS5.
+- `extensions/keys.ts` — пул ключей и ротация; `extensions/metrics.ts` —
+  сессионные счётчики; `extensions/stream-errors.ts` — классификация
+  оборванного SSE-потока.
+- `extensions/merge-models.ts`, `extensions/store.ts` — идемпотентное
+  применение оверрайдов в `~/.pi/agent/models.json` с леджером владения
+  (только свои `id`); `overrides/models.json` — сами оверрайды.
+- `extensions/i18n.ts` — все пользовательские строки в двух языках.
+- `extensions/discovery.ts`, `extensions/commands.ts` — живое
+  `GET /v1/models` и таблица дополнений команд.
+- `test/` — офлайн-тесты; `scripts/run-tests.mjs` — кроссплатформенный раннер.
+- `research/` — датированные разборы (поверхность pi/pi-ai, аудит живого
+  каталога NIM, маппинги thinking, механика прокси). Это источник фактов
+  для каталога и хуков.
 
-Issues live as markdown files under `.scratch/<feature>/` — a local, gitignored working directory that is not published. See `docs/agents/issue-tracker.md`.
+## Проверка
 
-### Triage labels
+```bash
+node scripts/link-pi.mjs   # один раз: линкует типы pi из глобальной установки
+npm run check              # typecheck + офлайн-тесты — обязательно до зелени
+```
 
-Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+`npm run acceptance:proxy-pool` — приёмочный прогон прокси-кольца; требует
+настоящих выходов и потому в `check` не входит.
 
-### Domain docs
+## Правила
 
-Single-context layout: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+- **Тесты строго офлайн.** Живые запросы к NIM тратят квоту ключа и упираются
+  в рейт-лимиты; E2E — только по явной просьбе пользователя.
+- **Ни одного секрета в дереве.** Ключи `nvapi-*`, файлы пулов
+  (`~/.pi/agent/nvidia-keys.json`, `nvidia-proxies.json`) и их содержимое
+  не попадают ни в код, ни в тесты, ни в фикстуры, ни в сообщения коммитов.
+  В уведомлениях, статусе, логах и разделяемом файле состояния выход прокси
+  фигурирует только как `host:port` — креды не пишутся никогда.
+- **Каталог — только по свидетельствам.** Значение попадает в
+  `overrides/models.json` или в `DEAD_MODELS` после живой пробы; непроверенная
+  семейная экстраполяция помечается как гипотеза (см. таблицу в README
+  § Models). `DEAD_MODELS` датирован: NIM снимает модели с публикации без
+  предупреждения, список всегда отстаёт.
+- **Значения `DEAD_MODELS` видны пользователю** — они подставляются в
+  `{reason}` уведомлений (`i18n.ts`: `deadOnSelect`, `deadObservedMarked`,
+  `respDeadNote`). Никаких внутренних id, номеров рабочих элементов и
+  дневниковых подробностей в этих строках.
+- **Все пользовательские строки — через `i18n.ts`, в обоих языках.** Наборы
+  подстановок `{name}` обязаны совпадать (`test/i18n.test.ts` это проверяет).
+  Не переводятся только отладочные метки `debug(...)` и машинные строки
+  (`reason` конфликтов из `merge-models.ts`).
+- **Номера рабочих элементов в комментариях** (`тикет NN`, `Story NN`) —
+  метки происхождения из локального, **не публикуемого** трекера
+  (`.scratch/`); из репозитория они не резолвятся. Смысл обязан стоять в самом
+  комментарии, номер — только указатель. `исследование NN` / `research NN`
+  резолвится: это файлы в `research/`. Подробности —
+  [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+- **Гейт по провайдеру.** Каждый обработчик проверяет `provider === "nvidia"`;
+  на чужих провайдерах расширение себя не проявляет. `models.json` трогается
+  только в провайдере `nvidia` и только по своему леджеру.
+- Node ≥ 22.6 (нативный type-stripping), ESM, strict TS без эмита: сборки нет,
+  pi исполняет `.ts` напрямую. Linux / macOS / Windows — пути только через
+  `node:os` `homedir()` + `node:path` `join()`.

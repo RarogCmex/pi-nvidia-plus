@@ -50,7 +50,7 @@ assert.deepEqual(m.formatParts().groups.map((g) => g.kind), [
 ]);
 assert.equal(m.snapshot().proxySwitches, 2);
 
-// Счётчик оборванных потоков (лог 01a0ceb8): виден в сводке только ненулевым.
+// Счётчик оборванных потоков: виден в сводке только ненулевым.
 m.truncatedStreams = 1;
 assert.deepEqual(m.formatParts().groups.map((g) => g.kind), [
   "retries",

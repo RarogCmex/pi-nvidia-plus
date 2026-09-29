@@ -24,9 +24,14 @@ const NEMOTRON_THINKING_MODELS = new Set([
   "nvidia/nemotron-3-super-120b-a12b",
   "nvidia/nemotron-3-ultra-550b-a55b",
   "nvidia/nemotron-3.5-lightning-30b-a3b",
-  // Тикет 19 (живые пробы 2026-08-30): chat_template_kwargs.enable_thinking,
-  // low_effort и top-level reasoning_effort/reasoning_budget принимаются;
-  // `enable_thinking` вне chat_template_kwargs отвергается 400.
+  // Живые пробы 2026-08-30: chat_template_kwargs.enable_thinking, low_effort и
+  // top-level reasoning_effort/reasoning_budget принимаются; `enable_thinking`
+  // вне chat_template_kwargs отвергается 400.
+  // Этот id с тех пор в DEAD_MODELS (410 на пробах 2026-09-18), но маппинг
+  // оставлен намеренно: список мёртвых — точка во времени, и если NIM вернёт
+  // id или выпустит суффиксную версию того же семейства, запрос должен уйти
+  // с правильными параметрами. Предупреждение о смерти показывает DEAD_MODELS,
+  // не этот набор.
   "nvidia/nemotron-3-nano-30b-a3b",
   "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
 ]);
@@ -38,8 +43,9 @@ const NEMOTRON_THINKING_MODELS = new Set([
 const GEMMA4 = /^google\/gemma-4/;
 
 // ── Гипотезы из референсов ────────────────────────────────────────────────
-// Источник — `subprojects/pi-nvidia-nim-provider` (handlers/thinking.ts,
-// config/model-families.ts). DeepSeek V4 проверена живыми пробами 2026-08-28 на
+// Источник — `pi-extension-nvidia-nim@1.5.1` (npm, MIT; `handlers/thinking.ts`,
+// `config/model-families.ts`), разбор — research/05-reference-plugins.md.
+// DeepSeek V4 проверена живыми пробами 2026-08-28 на
 // `deepseek-ai/deepseek-v4-pro-0813` (thinking=false гасит reasoning_content,
 // thinking=true + reasoning_effort low/high/max дают его); GLM остаётся гипотезой.
 const DEEPSEEK_V4 = /^deepseek-ai\/deepseek-v4/;

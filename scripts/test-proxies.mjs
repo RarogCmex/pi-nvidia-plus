@@ -1,28 +1,41 @@
 #!/usr/bin/env node
 /**
- * A/B тест прокси для pi-nvidia-plus
- * 
- * Проверяет гипотезу о том, что rate-limits зависят от IP-адреса.
- * Запускает тесты ключей через разные прокси и проверяет работу Kimi K3.
- * 
+ * A/B-бенчмарк выходов прокси для pi-nvidia-plus (опционально, вне `npm run check`).
+ *
+ * Зачем: рейт-лимиты NIM считаются по аккаунту, но наблюдаемая частота 429
+ * может зависеть и от точки выхода. Скрипт прогоняет один и тот же набор проб
+ * (health, auth, rate-limit, одна модель) через каждый выход и печатает сводку
+ * по типам выходов — чтобы выбор выхода опирался на замер, а не на догадку.
+ *
+ * Это НЕ замена `/nvidia-plus proxy check`: та команда меряет задержку и
+ * пиннит самый быстрый достижимый выход внутри живой сессии pi. Этот скрипт —
+ * разовый сравнительный прогон, которому нужен набор выходов и ключ.
+ *
+ * Тратит реальную квоту ключа: на каждый выход приходится серия запросов,
+ * включая намеренную пробу рейт-лимита.
+ *
  * Использование:
- *   node scripts/test-proxies.mjs
- * 
+ *   NVIDIA_API_KEY=nvapi-… PROXY_AB_LIST='[{"name":"a","url":"http://h:1080","type":"…","country":"…","asn":"…"}]' \
+ *     node scripts/test-proxies.mjs
+ *
  * Переменные окружения:
- *   NVIDIA_API_KEY - основной ключ (обязателен)
+ *   NVIDIA_API_KEY       - основной ключ (обязателен; в лог попадает только …последние 4 символа)
  *   NVIDIA_NIM_KEYS_FILE - путь к файлу с дополнительными ключами (опционально)
- *   TEST_MODEL - модель для тестирования (по умолчанию: moonshotai/kimi-k2.6)
+ *   PROXY_AB_LIST        - JSON-массив выходов [{name,url,type,country,asn}]
+ *   TEST_MODEL           - модель для тестирования (по умолчанию: moonshotai/kimi-k3)
  */
 
 import { fetch, ProxyAgent } from "undici";
 import { mkdirSync, writeFileSync } from "node:fs";
 
 /**
- * Список выходов для A/B. Живые креденшелы НИКОГДА не хардкодим: прокси
- * задаются в окружении (PROXY_AB_LIST — JSON-массив [{name,url,type,country,asn}])
- * или в gitignored-файле test-results/ab-proxies.json. Форма записи url —
- * как в NVIDIA_NIM_PROXIES (http(s) с userinfo; socks в результатах тикета 30
- * присутствовали исторически — этот скрипт их просто пробует через ProxyAgent).
+ * Список выходов для A/B. Живые креденшелы НИКОГДА не хардкодим: выходы берутся
+ * из окружения (PROXY_AB_LIST — JSON-массив [{name,url,type,country,asn}]) или из
+ * локального `test-results/ab-proxies.json` — этот каталог в `.gitignore`, в
+ * свежем клоне его нет, поэтому без PROXY_AB_LIST скрипт прогоняет два
+ * синтетических примера формы (RFC 5737 и заведомо мёртвый loopback).
+ * Форма записи url — как в NVIDIA_NIM_PROXIES: http(s) с userinfo; socks5
+ * этот скрипт просто пробует через ProxyAgent.
  */
 import { existsSync, readFileSync } from "node:fs";
 function loadProxies() {

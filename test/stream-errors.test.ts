@@ -1,6 +1,6 @@
 /**
- * Тесты шва классификации оборванных потоков (extensions/stream-errors.ts,
- * лог 01a0ceb8: NIM обрывает SSE без finish_reason на длинном thinking-выводе).
+ * Тесты шва классификации оборванных потоков (extensions/stream-errors.ts:
+ * NIM обрывает SSE без finish_reason на длинном thinking-выводе).
  * Запуск: node test/stream-errors.test.ts
  */
 import assert from "node:assert/strict";

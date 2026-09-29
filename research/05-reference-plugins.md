@@ -1,6 +1,10 @@
 # 05 — Анализ референсных расширений (материал к выбору архитектуры)
 
-Дата: 2026-08-26. Клоны в `subprojects/` (в `.gitignore`), оба под **MIT**.
+Дата: 2026-08-26. Разобраны два опубликованных расширения, оба под **MIT**:
+`pi-nvidia-nim@1.1.23` (npm, xRyul; upstream `github.com/xRyul/pi-nvidia-nim`)
+и `pi-extension-nvidia-nim@1.5.1` (npm, stridertibe; upstream
+`github.com/Tibbee/pi-nvidia-nim-provider`). Пакеты извлекались через
+`npm pack` — локальные клоны в это дерево не входят.
 
 | | `xRyul/pi-nvidia-nim` v1.1.23 | `Tibbee/pi-nvidia-nim-provider` = npm `pi-extension-nvidia-nim` v1.5.1 |
 |---|---|---|

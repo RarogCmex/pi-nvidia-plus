@@ -17,7 +17,8 @@
     "pi-extension",
     "nvidia",
     "nim",
-    "llm-provider"
+    "thinking-control",
+    "proxy-pool"
   ],
   "engines": {
     "node": ">=22.6"
@@ -32,7 +33,9 @@
     "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "npm run typecheck && npm test",
-    "acceptance:proxy-pool": "node scripts/proxy-pool-acceptance.mjs"
+    "acceptance:proxy-pool": "node scripts/proxy-pool-acceptance.mjs",
+    "discover": "node scripts/discover-models.mjs",
+    "bench:proxies": "node scripts/test-proxies.mjs"
   },
   "pi": {
     "extensions": [

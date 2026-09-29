@@ -1,9 +1,10 @@
 {
-  // Тайпчек спайка против типов пи:
-  //   tsc -p tsconfig.typecheck.json
-  // Требует симлинк (вне гита):
-  //   mkdir -p node_modules/@earendil-works
-  //   ln -sfn ~/.local/lib/node_modules/@earendil-works/pi-coding-agent node_modules/@earendil-works/pi-coding-agent
+  // Тайпчек против типов pi:
+  //   npm run typecheck        (tsc -p tsconfig.typecheck.json)
+  // Требует один раз слинковать типы pi из глобальной установки (вне гита):
+  //   node scripts/link-pi.mjs
+  // Скрипт сам находит pi (npm -g, nvm, pnpm, ~/.local); для конкретного пути:
+  //   PI_ROOT=/path/to/node_modules node scripts/link-pi.mjs
   "compilerOptions": {
     "target": "es2022",
     "module": "esnext",

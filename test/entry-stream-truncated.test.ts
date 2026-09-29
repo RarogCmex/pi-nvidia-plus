@@ -1,6 +1,6 @@
 /**
  * Интеграция входной точки с фейковым пи: обработка оборванного потока
- * (лог 01a0ceb8 — «Stream ended without finish_reason» на nemotron-3-ultra).
+ * («Stream ended without finish_reason», наблюдалось на nemotron-3-ultra).
  * Проверяет: `message_end` на nvidia-модели даёт одно дросселированное
  * предупреждение и счётчик в `/nvidia-plus status`; на не-nvidia модели и
  * на не-обрывных ошибках молчит.

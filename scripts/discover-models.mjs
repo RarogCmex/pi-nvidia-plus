@@ -22,6 +22,10 @@ import { join } from "node:path";
 const NVIDIA_ORIGIN = "https://integrate.api.nvidia.com";
 
 // ─── Copied/ported from extensions/discovery.ts ────────────────────────────
+// ВНИМАНИЕ: это копия, а не импорт — скрипт работает без pi и без TypeScript.
+// Правя классификацию в extensions/discovery.ts, поправь и здесь, иначе
+// `node scripts/discover-models.mjs` и `/nvidia-plus discover` разойдутся.
+// Тесты покрывают только extensions/discovery.ts (test/discovery.test.ts).
 
 function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
