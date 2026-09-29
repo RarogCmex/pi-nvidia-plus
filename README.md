@@ -231,6 +231,25 @@ junctions. To point at a specific install:
 
 Verified against pi 0.87.1 / Node 26.
 
+`npm install` is **not** needed for `npm run check` — the link above is what makes
+the typecheck resolve pi's types. You only need it for the two opt-in scripts that
+`import "undici"` directly (`npm run bench:proxies`, `npm run discover`); the
+extension itself deliberately resolves *pi's* undici at runtime, never a local
+copy. Two consequences worth knowing:
+
+- Because pi is declared as an (optional) peer, `npm install` also materializes a
+  full copy of the agent tree. It does not replace an existing link, so running
+  `link-pi.mjs` first is safe — but that copy is not what the typecheck should use.
+- **There is deliberately no `package-lock.json` in this repository.** With the pi
+  link in place, npm writes the installer's own path into the lock as a relative
+  specifier (`../../.local/lib/node_modules/…`) on every `npm install`, so a
+  committed lock keeps re-acquiring one machine's directory layout. A lock
+  generated *without* the link is clean but pins the entire agent tree (293
+  packages, esbuild binaries for every platform, the AWS and Google SDKs). The
+  only thing a lock would usefully pin here is `undici`, which nothing in this
+  package ships. Do not re-add it; if reproducibility for the opt-in scripts is
+  ever wanted, pin `undici` exactly in `devDependencies` instead.
+
 ## Compatibility
 
 Linux, macOS and Windows are supported. Pure TypeScript, no native modules, no shell-outs. Paths go through `node:os` `homedir()` + `node:path` `join()`; the atomic shared-state write falls back to copy+delete on Windows where `rename` over an open file fails with `EPERM`.
