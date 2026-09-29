@@ -26,7 +26,7 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
 
 ## Installation
 
-Requirements: **Node ≥ 22.6** (uses native TypeScript stripping), [pi-coding-agent](https://github.com/earendil-works/pi) installed.
+Requirements: **Node ≥ 22.18** (runs TypeScript directly — type stripping and `.ts` test discovery are unflagged from 22.18; Node 24+ also works) and [pi](https://github.com/earendil-works/pi) installed.
 
 ```bash
 pi install git:github.com/RarogCmex/pi-nvidia-plus@main

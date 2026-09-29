@@ -1,6 +1,6 @@
 /**
  * Тесты чистой логики владения оверрайдами (extensions/merge-models.ts).
- * Запуск: node test/merge-models.test.ts (Node ≥ 22.6, type stripping).
+ * Запуск: node test/merge-models.test.ts (Node ≥ 22.18, type stripping).
  */
 import assert from "node:assert/strict";
 import {
