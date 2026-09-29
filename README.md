@@ -1,5 +1,7 @@
 # pi-nvidia-plus
 
+npm package: `@rarogcmex/pi-nvidia-plus`.
+
 Pi extension that improves the built-in `nvidia` provider **in place** — no duplicate provider, no forking of the streaming pipeline. You keep selecting `nvidia/...` models with the NVIDIA API key pi already uses; the extension only fixes what the built-in provider can't do.
 
 [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`) is the coding agent this extension plugs into. It ships a built-in `nvidia` provider for NVIDIA NIM (`https://integrate.api.nvidia.com`); this extension hooks that provider rather than replacing it, so pi's own auth, streaming, retries and cost attribution are untouched.
