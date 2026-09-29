@@ -63,7 +63,10 @@
         "poolside/laguna-xs-2.1": {
           "reasoning": true,
           "compat": {
-            "thinkingFormat": "qwen-chat-template",
+            "thinkingFormat": "chat-template",
+            "chatTemplateKwargs": {
+              "enable_thinking": { "$var": "thinking.enabled" }
+            },
             "requiresReasoningContentOnAssistantMessages": true
           }
         },

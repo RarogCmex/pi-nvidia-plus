@@ -49,7 +49,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscovered, MODELS_JSON, STATE_FILE } from "./store.ts";
-import { transformRequest, thinkingPlan, type Payload } from "./transform.ts";
+import { transformRequest, thinkingPlan, thinkingPlanCaveat, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
 import {
@@ -113,9 +113,17 @@ function metricsSummary(): string {
 const DEBUG = process.env.PI_NVIDIA_PLUS_DEBUG === "1";
 const DEBUG_LOG = join(homedir(), ".pi", "nvidia-plus-debug.log");
 
-// ── Мёртвые модели встроенного каталога (аудит, тикет 02) ───────────────────
-// 410 EOL — надёжно; 404-стойкий — по пробам (404 бывает транзитным).
-const DEAD_MODELS: Record<string, string> = {
+// ── Мёртвые модели встроенного каталога ────────────────────────────────────
+// Аудит живого каталога 2026-08-26 (research/02-nim-catalog-audit.md) + добор
+// 2026-09-18. 410 EOL — надёжный признак; «404 in every probe» — по пробам
+// (404 бывает транзитным), поэтому дата в скобках обязательна.
+//
+// ЗНАЧЕНИЯ ВИДНЫ ПОЛЬЗОВАТЕЛЮ: они подставляются в `{reason}` уведомлений
+// (i18n.ts: deadOnSelect, deadObservedMarked, respDeadNote). Никаких внутренних
+// идентификаторов — номеров рабочих элементов, «audit NN», «ticket NN», «лог
+// XXXXXXXX» — и никаких дневниковых подробностей. test/dead-models.test.ts
+// это проверяет.
+export const DEAD_MODELS: Record<string, string> = {
   "meta/llama-3.1-70b-instruct": "410 EOL",
   "meta/llama-3.1-8b-instruct": "410 EOL",
   "meta/llama-3.3-70b-instruct": "410 EOL",
@@ -126,40 +134,40 @@ const DEAD_MODELS: Record<string, string> = {
   "nvidia/nemotron-nano-12b-v2-vl": "410 EOL",
   "nvidia/nvidia-nemotron-nano-9b-v2": "410 EOL",
   "thinkingmachines/inkling": "410 EOL",
-  "deepseek-ai/deepseek-v4-flash-0731": "EOL announced: deprecated 2026-09-19, unsupported after 2026-09-21 per build.nvidia.com; chat probes hang (2026-09-18)",
-  "deepseek-ai/deepseek-v4-pro-0813": "410 EOL (probe 2026-09-18)",
-  "minimaxai/minimax-m3": "410 EOL (probe 2026-09-18)",
-  "meta/muse-glimmer-30b": "404 on probe 2026-09-18 (was alive)",
+  "deepseek-ai/deepseek-v4-flash-0731": "end of life after 2026-09-21, announced by NVIDIA (chat probes hung on 2026-09-18)",
+  "deepseek-ai/deepseek-v4-pro-0813": "410 EOL (probed 2026-09-18)",
+  "minimaxai/minimax-m3": "410 EOL (probed 2026-09-18)",
+  "meta/muse-glimmer-30b": "404 on probe 2026-09-18 (answered before that)",
   // nvidia/nemotron-3.5-lightning-30b-a3b воскресела: 200 на пробах 2026-09-18 — убрана из мёртвых
-  "google/gemma-3-4b-it": "404 in all probes",
-  "google/gemma-3-12b-it": "404 in all probes",
-  "mistralai/mistral-7b-instruct-v0.3": "404 in all probes",
-  "moonshotai/kimi-k2.6": "404 in all probes",
-  "nvidia/cosmos-reason2-8b": "404 in all probes",
-  "nvidia/llama-3.1-nemotron-70b-instruct": "404 in all probes (re-check ticket 08)",
-  "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in all probes",
+  "google/gemma-3-4b-it": "404 in every probe",
+  "google/gemma-3-12b-it": "404 in every probe",
+  "mistralai/mistral-7b-instruct-v0.3": "404 in every probe",
+  "moonshotai/kimi-k2.6": "404 in every probe",
+  "nvidia/cosmos-reason2-8b": "404 in every probe",
+  "nvidia/llama-3.1-nemotron-70b-instruct": "404 in every probe",
+  "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in every probe",
   // Вне базы пи (аудит 02; нужно для живого обнаружения — не добавлять мёртвых)
   // Пробы 2026-09-18: наши бывшие оверрайды, померли
-  "nvidia/nemotron-3-nano-30b-a3b": "410 EOL (probe 2026-09-18)",
-  "openai/gpt-oss-120b": "410 EOL (probe 2026-09-18)",
-  "stepfun-ai/step-3.7-flash": "410 EOL (probe 2026-09-18)",
-  "01-ai/yi-large": "404 in all probes (audit 02)",
-  "ai21labs/jamba-1.5-large-instruct": "404 in all probes (audit 02)",
-  "databricks/dbrx-instruct": "404 in all probes (audit 02)",
-  "deepseek-ai/deepseek-v4-flash": "410 EOL (audit 02)",
-  "deepseek-ai/deepseek-v4-pro": "410 EOL (audit 02)",
-  "microsoft/phi-3-vision-128k-instruct": "404 in all probes (audit 02)",
-  "microsoft/phi-3.5-moe-instruct": "404 in all probes (audit 02)",
-  "mistralai/codestral-22b-instruct-v0.1": "404 in all probes (audit 02)",
-  "mistralai/mistral-large": "404 in all probes (audit 02)",
-  "mistralai/mistral-large-2-instruct": "404 in all probes (audit 02)",
-  "mistralai/mixtral-8x22b-v0.1": "404 in all probes (audit 02)",
-  "nvidia/llama-3.1-nemotron-51b-instruct": "404 in all probes (audit 02)",
-  "nvidia/nemotron-4-340b-instruct": "404 in all probes (audit 02)",
-  "nvidia/nemotron-mini-4b-instruct": "410 EOL (audit 02)",
-  "nvidia/nemotron-nano-3-30b-a3b": "404 in all probes (audit 02)",
-  "nvidia/vila": "404 in all probes (audit 02)",
-  "writer/palmyra-creative-122b": "404 in all probes (audit 02)",
+  "nvidia/nemotron-3-nano-30b-a3b": "410 EOL (probed 2026-09-18)",
+  "openai/gpt-oss-120b": "410 EOL (probed 2026-09-18)",
+  "stepfun-ai/step-3.7-flash": "410 EOL (probed 2026-09-18)",
+  "01-ai/yi-large": "404 in every probe (catalog audit 2026-08-26)",
+  "ai21labs/jamba-1.5-large-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "databricks/dbrx-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "deepseek-ai/deepseek-v4-flash": "410 EOL (catalog audit 2026-08-26)",
+  "deepseek-ai/deepseek-v4-pro": "410 EOL (catalog audit 2026-08-26)",
+  "microsoft/phi-3-vision-128k-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "microsoft/phi-3.5-moe-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "mistralai/codestral-22b-instruct-v0.1": "404 in every probe (catalog audit 2026-08-26)",
+  "mistralai/mistral-large": "404 in every probe (catalog audit 2026-08-26)",
+  "mistralai/mistral-large-2-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "mistralai/mixtral-8x22b-v0.1": "404 in every probe (catalog audit 2026-08-26)",
+  "nvidia/llama-3.1-nemotron-51b-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "nvidia/nemotron-4-340b-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "nvidia/nemotron-mini-4b-instruct": "410 EOL (catalog audit 2026-08-26)",
+  "nvidia/nemotron-nano-3-30b-a3b": "404 in every probe (catalog audit 2026-08-26)",
+  "nvidia/vila": "404 in every probe (catalog audit 2026-08-26)",
+  "writer/palmyra-creative-122b": "404 in every probe (catalog audit 2026-08-26)",
 };
 
 function debug(stage: string, label: string, payload: unknown): void {
@@ -218,10 +226,12 @@ let lastNvidiaModelId: string | undefined;
 let lastSwitchNotifyAt = 0;
 let suppressedSwitchCount = 0;
 
-// Прозрачный транспортный повтор 429/5xx (тикет 14): короткие рейт-лимиты и
-// шлюзовые ошибки повторяются под наблюдателем, и пи с моделью их не видят.
-// Темп (живое замечание тикета 15): 4 попытки на ключ с плоской задержкой 2 с —
-// живой NIM заголовки в 429 не даёт, а рейт-лимит на аккаунт плавает.
+// Прозрачный транспортный повтор 429/5xx: короткие рейт-лимиты и шлюзовые
+// ошибки повторяются под наблюдателем, и pi с моделью их не видят.
+// Темп: `maxRetries: 3` — то есть до 4 попыток на ключ — с экспоненциальным
+// откатом 2 с → 30 с. Плоской задержки здесь нет; короткий нижний порог нужен
+// потому, что живой NIM заголовки в 429 не отдаёт, а рейт-лимит на аккаунт
+// плавает, так что опереться на retry-after нельзя.
 const TRANSPORT_RETRY = { maxRetries: 3, minDelayMs: 2_000, maxDelayMs: 30_000 } as const;
 // Прозрачный повтор in-band перегрузки (тикет 29): NIM отдаёт HTTP 200 с SSE-
 // событием `{"error":{"message":"Service temporarily overloaded"}}` — статусные
@@ -764,7 +774,9 @@ function statusLine(ctx: ExtensionContext): string | undefined {
   if (!model || model.provider !== PROVIDER) return undefined;
   const level = ctx.thinkingLevel;
   const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
-  return `nv+ ${model.id} · thinking ${level ?? "?"}${plan ? ` → ${plan}` : t("statusNoInjection")}`;
+  const caveatKey = thinkingPlanCaveat(model.id);
+  const caveat = caveatKey ? t(caveatKey) : "";
+  return `nv+ ${model.id} · thinking ${level ?? "?"}${plan ? ` → ${plan}${caveat}` : t("statusNoInjection")}`;
 }
 
 export default function piNvidiaPlus(pi: ExtensionAPI): void {
@@ -1088,11 +1100,14 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       }
       const level = ctx.thinkingLevel;
       const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
+      const caveatKey = thinkingPlanCaveat(model.id);
       ctx.ui.notify(
         `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}; ${metricsState}): ${t("statusThinking", {
           modelId: model.id,
           level: level ?? "?",
-          plan: plan ? t("statusInjectsPlan", { plan }) : t("statusNoInjection"),
+          plan: plan
+            ? t("statusInjectsPlan", { plan: `${plan}${caveatKey ? t(caveatKey) : ""}` })
+            : t("statusNoInjection"),
         })}`,
         "info",
       );

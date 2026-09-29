@@ -29,14 +29,39 @@ import { createRequire } from "node:module";
 import { realpathSync } from "node:fs";
 import { join } from "node:path";
 
-const undici = createRequire(join(realpathSync("node_modules/@earendil-works/pi-coding-agent"), "index.js"))("undici");
+/**
+ * undici нужен **сам pi**, а не копия из этого пакета: расширение ставит
+ * глобальный диспетчер именно в экземпляр pi, поэтому приёмка обязана мерить тот
+ * же объект. Резолвим от слинкованного `node_modules/@earendil-works/pi-coding-agent`.
+ *
+ * Без dev-симлинка `realpathSync` бросил бы голый ENOENT — непонятно, что чинить.
+ * Здесь ошибка называется явно.
+ */
+function loadPiUndici() {
+  const link = join("node_modules", "@earendil-works", "pi-coding-agent");
+  let piEntry;
+  try {
+    piEntry = join(realpathSync(link), "index.js");
+  } catch {
+    console.error(
+      `proxy-pool-acceptance: ${link} не найден.\n` +
+        "  Этот приёмочный прогон меряет undici самого pi, поэтому его пакеты\n" +
+        "  нужно слинковать заранее:  node scripts/link-pi.mjs\n" +
+        "  (или укажите установку явно: PI_ROOT=/path/to/node_modules node scripts/link-pi.mjs)",
+    );
+    process.exit(1);
+  }
+  return createRequire(piEntry)("undici");
+}
+
+const undici = loadPiUndici();
 const NVIDIA_ORIGIN = "https://integrate.api.nvidia.com";
 
 /** Синтетические значения для проверки разбора (без живых креденшелов). */
 const SCHEME_FIXTURES = [
   "socks4://user:pass@203.0.113.6:1080", // reject (socks4 не поддержан)
   "ftp://user:pass@203.0.113.9:21", // reject (не-http(s)/socks5)
-  "socks5://user:pass@203.0.113.7:1080", // accept (тикет 05)
+  "socks5://user:pass@203.0.113.7:1080", // accept (нативный Socks5ProxyAgent)
   "socks5h://user:pass@203.0.113.8:16901", // accept, нормализуется в socks5
   "http://user:pass@203.0.113.10:8080", // accept
   "http://127.0.0.1:1/", // accept, заведомо мёртвый (ECONNREFUSED)

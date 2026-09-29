@@ -731,6 +731,12 @@ export const MESSAGES = {
     en: " → injects {plan}",
     ru: " → инжектит {plan}",
   },
+  // Оговорки к плану инжекта. Ключи выдаёт `thinkingPlanCaveat` (transform.ts);
+  // текст живёт здесь, а не там, чтобы план не приезжал в UI на одном языке.
+  planCaveatGemma4Hangs: {
+    en: " (thinking is force-disabled: this model hangs in thinking mode — no response within the 120 s header timeout at any level, and answers in ~2 s with enable_thinking=false)",
+    ru: " (мышление выключено принудительно: в режиме мышления модель виснет — ответ не приходит за 120 с при любом уровне, а с enable_thinking=false отвечает за ~2 с)",
+  },
 
   // ── Живое обнаружение (тикет 12) ─────────────────────────────────────
   discoverHttpError: {

@@ -6,7 +6,7 @@
  * (подтверждена живыми пробами) и пользовательская история №19.
  */
 import assert from "node:assert/strict";
-import { transformRequest, thinkingPlan, type Payload } from "../extensions/transform.ts";
+import { transformRequest, thinkingPlan, thinkingPlanCaveat, type Payload } from "../extensions/transform.ts";
 
 const M3 = "minimaxai/minimax-m3";
 const N3 = "nvidia/nemotron-3-super-120b-a12b";
@@ -198,6 +198,11 @@ for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"])
   const r = transformRequest({ model: GEMMA4 }, { modelId: GEMMA4, thinkingLevel: level });
   assert.equal(kwargs(r.payload).enable_thinking, false, `gemma-4 ${level}: мышление должно быть выключено`);
 }
-assert.equal(thinkingPlan(GEMMA4, "high"), "chat_template_kwargs.enable_thinking=false (модель виснет в режиме мышления)");
+// План — только wire-параметры: пояснение уходит в i18n, иначе
+// PI_NVIDIA_PLUS_LANG=en получал бы русскую строку в статус-баре.
+assert.equal(thinkingPlan(GEMMA4, "high"), "chat_template_kwargs.enable_thinking=false");
+assert.equal(thinkingPlanCaveat(GEMMA4), "planCaveatGemma4Hangs", "для gemma-4 нужна оговорка");
+assert.equal(thinkingPlanCaveat(N3), undefined, "у nemotron оговорки нет");
+assert.equal(thinkingPlanCaveat(OTHER), undefined, "у чужого семейства оговорки нет");
 
 console.log("transform: все проверки прошли");

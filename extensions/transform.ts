@@ -57,10 +57,16 @@ function minimaxThinkingMode(level: string): string {
   return "adaptive"; // minimal / low / medium
 }
 
-/** Что хук инжектит для модели+уровня (для статус-строки и /nvidia-plus status). */
+/**
+ * Что хук инжектит для модели+уровня (для статус-строки и /nvidia-plus status).
+ *
+ * Возвращает **только** wire-параметры, без пояснений: строка уходит в UI, а
+ * модуль остаётся чистым швом без pi и без локали. Пояснение — отдельный ключ
+ * `thinkingPlanCaveat`, который переводит i18n-слой.
+ */
 export function thinkingPlan(modelId: string, level: string): string | undefined {
   if (GEMMA4.test(modelId)) {
-    return "chat_template_kwargs.enable_thinking=false (модель виснет в режиме мышления)";
+    return "chat_template_kwargs.enable_thinking=false";
   }
   if (modelId === MINIMAX_M3) {
     return `chat_template_kwargs.thinking_mode="${minimaxThinkingMode(level)}"`;
@@ -80,6 +86,17 @@ export function thinkingPlan(modelId: string, level: string): string | undefined
     const effort = level === "minimal" ? "" : `, reasoning_effort=${level === "xhigh" || level === "max" ? "max" : "high"}`;
     return `chat_template_kwargs.enable_thinking=true, clear_thinking=false${effort}`;
   }
+  return undefined;
+}
+
+/**
+ * Ключ i18n-сообщения с оговоркой к плану инжекта, если для модели она есть.
+ * Ключи стабильны и перечислены в `extensions/i18n.ts` (`planCaveat*`); здесь
+ * намеренно нет готового текста, чтобы `PI_NVIDIA_PLUS_LANG=en` не получал
+ * русскую строку.
+ */
+export function thinkingPlanCaveat(modelId: string): "planCaveatGemma4Hangs" | undefined {
+  if (GEMMA4.test(modelId)) return "planCaveatGemma4Hangs";
   return undefined;
 }
 

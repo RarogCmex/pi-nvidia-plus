@@ -206,6 +206,19 @@ base.getModels(), config), extension)` (`provider-composer.js`,
   enabled/disabled (+`clear_thinking`) и опционально `reasoning_effort`;
   `"deepseek"` — `thinking.type` enabled/disabled + `reasoning_effort`;
   `"string-thinking"`, `"together"`, `"openrouter"`, `"baseten"`, `"ant-ling"`.
+- `"qwen-chat-template"` — **добавлено позже, при сверке с pi 0.87.1**; в исходном
+  разборе от 2026-08-26 (pi 0.73) этого значения не было. Пишет
+  `chat_template_kwargs: {enable_thinking: !!reasoningEffort, preserve_thinking:
+  true}` — то есть, в отличие от `"chat-template"`, состав полей **захардкожен**:
+  `preserve_thinking: true` добавляется всегда и настройке не подлежит, а
+  `compat.chatTemplateKwargs` игнорируется.
+
+Полный список на pi 0.87.1 (`pi-ai/dist/types.d.ts`, схема
+`dist/core/model-config.js` — 11 значений): `openai`, `openrouter`, `together`,
+`baseten`, `deepseek`, `zai`, `qwen`, `chat-template`, `qwen-chat-template`,
+`string-thinking`, `ant-ling`. Все 11 обрабатываются в
+`openai-completions.js`. **Перед выбором формата сверяйтесь с установленным pi, а
+не с этой таблицей**: список растёт, а разбор датирован.
 
 Это значит: для семейств, укладываемых в эти форматы, управление мышлением
 реализуется **чисто метаданными** (`thinkingFormat` + `chatTemplateKwargs` +
