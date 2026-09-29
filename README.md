@@ -231,15 +231,23 @@ junctions. To point at a specific install:
 
 Verified against pi 0.87.1 / Node 26.
 
-`npm install` is **not** needed for `npm run check` — the link above is what makes
-the typecheck resolve pi's types. You only need it for the two opt-in scripts that
-`import "undici"` directly (`npm run bench:proxies`, `npm run discover`); the
-extension itself deliberately resolves *pi's* undici at runtime, never a local
-copy. Two consequences worth knowing:
+`npm install` is **not** needed for `npm run check` — `link-pi.mjs` provides
+everything the typecheck and the tests resolve, which is pi's types and **pi's own
+undici**. Linking undici rather than installing it matters: the extension installs
+a global dispatcher, and that only affects pi's fetch when it is the *same module
+instance* pi loaded. `resolvePiUndici()` derives its require base from
+`process.argv[1]` — pi's entry point under pi, but the test file itself when a test
+is run directly — so the tests resolve undici by walking up from this repository.
+An `npm install`ed copy would satisfy them while exercising a *different* undici
+than pi uses, which is worse than failing: the test passes against the wrong
+object. (Verified on a fresh clone: without any link the proxy preflight test
+fails; with pi's undici linked it passes.)
 
-- Because pi is declared as an (optional) peer, `npm install` also materializes a
-  full copy of the agent tree. It does not replace an existing link, so running
-  `link-pi.mjs` first is safe — but that copy is not what the typecheck should use.
+One consequence of pi being declared as an (optional) peer: if you do run
+`npm install`, it materializes a full copy of the agent tree. It does not replace
+an existing link, so running `link-pi.mjs` first is safe — but that copy is not
+what the typecheck or the tests should use, and `npm install` will leave a
+registry undici beside the link. Prefer `link-pi.mjs` alone.
 - **There is deliberately no `package-lock.json` in this repository.** With the pi
   link in place, npm writes the installer's own path into the lock as a relative
   specifier (`../../.local/lib/node_modules/…`) on every `npm install`, so a

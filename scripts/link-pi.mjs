@@ -24,8 +24,23 @@ import { fileURLToPath } from "node:url";
 
 const PI_PKG = "@earendil-works/pi-coding-agent";
 
-/** [link name under node_modules, path under PI_ROOT] */
-const LINKS = [[PI_PKG, PI_PKG]];
+/**
+ * [link name under node_modules, path under PI_ROOT]
+ *
+ * `undici` is linked to **pi's own copy**, not installed from the registry. The
+ * extension resolves pi's undici at runtime on purpose — installing a global
+ * dispatcher only affects pi's fetch if it is the same module instance pi loaded.
+ * `resolvePiUndici()` derives its require base from `process.argv[1]`, which under
+ * pi is pi's entry point but under a directly-run test is the test file itself, so
+ * the tests resolve undici by walking up from this repository. Without a link here
+ * they find nothing on a fresh clone; with an `npm install`ed copy they would find
+ * a *different* undici than pi uses, which is worse — the test would exercise the
+ * wrong module object and still pass.
+ */
+const LINKS = [
+  [PI_PKG, PI_PKG],
+  ["undici", `${PI_PKG}/node_modules/undici`],
+];
 
 /** First `pi` on PATH, resolved through symlinks; undefined when absent. */
 function piBinDir() {
