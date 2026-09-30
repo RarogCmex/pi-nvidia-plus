@@ -24,7 +24,8 @@
  * `models.json` трогается только в провайдере `nvidia` и только по своему леджеру.
  *
  * Отладка: `PI_NVIDIA_PLUS_DEBUG=1` пишет финальные пейлоады в
- * `~/.pi/nvidia-plus-debug.log`.
+ * `<agentDir>/nvidia-plus-debug.log` (каталог конфига пи: `~/.pi/agent` по
+ * умолчанию, `$PI_CODING_AGENT_DIR` — если задан).
  *
  * Прокси: `NVIDIA_NIM_PROXIES[_FILE]` (легаси — одиночный `NVIDIA_NIM_PROXY`,
  * например `http://127.0.0.1:8870`) маршрутизирует только запросы к
@@ -45,10 +46,8 @@
 import { appendFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscovered, MODELS_JSON, STATE_FILE } from "./store.ts";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { agentFile, applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscovered, modelsJsonPath, stateFilePath } from "./store.ts";
 import { transformRequest, thinkingPlan, thinkingPlanCaveat, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
@@ -111,7 +110,8 @@ function metricsSummary(): string {
   });
 }
 const DEBUG = process.env.PI_NVIDIA_PLUS_DEBUG === "1";
-const DEBUG_LOG = join(homedir(), ".pi", "nvidia-plus-debug.log");
+// Каталог конфига пи, а не зашитый `~/.pi`: резолвится при вызове (см. `agentFile`).
+const debugLogPath = (): string => agentFile("nvidia-plus-debug.log");
 
 // ── Мёртвые модели встроенного каталога ────────────────────────────────────
 // Аудит живого каталога 2026-08-26 (research/02-nim-catalog-audit.md) + добор
@@ -174,7 +174,7 @@ function debug(stage: string, label: string, payload: unknown): void {
   if (!DEBUG) return;
   try {
     appendFileSync(
-      DEBUG_LOG,
+      debugLogPath(),
       `--- ${new Date().toISOString()} ${stage} ${label} ---\n${JSON.stringify(payload, null, 2)}\n`,
     );
   } catch {
@@ -245,8 +245,11 @@ function transportRetryEnabled(): boolean {
 
 // ── Ротация ключей NIM (тикет 15) ──────────────────────────────────────────────
 // Пул читается из файла/окружения (расширение его никогда не пишет); ключ пи всегда первый в кольце — его подставляет сам пи в `Authorization`.
+// `defaultPath` резолвится один раз на импорте расширения: пи стартует с уже
+// заданным окружением, а вот сообщения пользователю обязаны показывать путь
+// живьём — поэтому ниже они строятся через `agentFile()`, а не этой константой.
 const keyPool = new KeyPool({
-  defaultPath: join(homedir(), ".pi", "agent", DEFAULT_KEYS_FILE_NAME),
+  defaultPath: agentFile(DEFAULT_KEYS_FILE_NAME),
   env: process.env as Record<string, string | undefined>,
   onWarn: (message) => proxyState.notify?.(message, "warning"),
 });
@@ -255,7 +258,7 @@ const keyRotator = new KeyRotator();
 // pi-subagents — отдельные процессы со своим KeyRotator). Выключатель:
 // NVIDIA_NIM_SHARED_ROTATION=0. Включается только при заданном пуле.
 if (keyPool.hasSource() && !/^(0|false|no|off)$/i.test(process.env.NVIDIA_NIM_SHARED_ROTATION?.trim() ?? "")) {
-  keyRotator.attachSharedState(join(homedir(), ".pi", "agent", "nvidia-keys-state.json"));
+  keyRotator.attachSharedState(agentFile("nvidia-keys-state.json"));
 }
 const keyRotationState = {
   enabled: (() => {
@@ -283,7 +286,7 @@ function notifyRotationIntro(ui: { notify: Notifier }): void {
 // Та же форма, что у пула ключей: один победивший источник (инлайн / файл /
 // легаси-одиночка), горячая перезагрузка, расширение файл не пишет.
 const proxyPool = new ProxyPool({
-  defaultPath: join(homedir(), ".pi", "agent", DEFAULT_PROXIES_FILE_NAME),
+  defaultPath: agentFile(DEFAULT_PROXIES_FILE_NAME),
   env: process.env as Record<string, string | undefined>,
   onWarn: (message) => proxyState.notify?.(message, "warning"),
 });
@@ -295,7 +298,7 @@ function proxySharedStateEnabled(): boolean {
   return !/^(0|false|no|off)$/i.test(process.env.NVIDIA_NIM_SHARED_PROXY?.trim() ?? "");
 }
 if (proxyPool.hasSource() && proxyPool.winningSource()?.kind !== "legacy" && proxySharedStateEnabled()) {
-  proxyRotator.attachSharedState(join(homedir(), ".pi", "agent", "nvidia-proxies-state.json"));
+  proxyRotator.attachSharedState(agentFile("nvidia-proxies-state.json"));
 }
 const proxyRotationState = {
   enabled: (() => {
@@ -1005,8 +1008,8 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             t("applyApplied", {
               overrides: result.summary.overrideIds.length,
               models: result.summary.modelIds.length,
-              path: MODELS_JSON,
-              ledger: STATE_FILE,
+              path: modelsJsonPath(),
+              ledger: stateFilePath(),
             }),
             "info",
           );
@@ -1132,7 +1135,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         }
         const poolKeys = keyPool.refresh();
         if (poolKeys.length === 0) {
-          ctx.ui.notify(t("keysPoolNotSet", { file: DEFAULT_KEYS_FILE_NAME }), "info");
+          ctx.ui.notify(t("keysPoolNotSet", { file: agentFile(DEFAULT_KEYS_FILE_NAME) }), "info");
           return;
         }
         ctx.ui.notify(t("keysCheckStart", { count: poolKeys.length, modelId: model.id }), "info");
@@ -1180,7 +1183,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
       const poolKeys = keyPool.refresh();
       if (!keyPool.hasSource() && poolKeys.length === 0) {
         ctx.ui.notify(
-          t("keysPoolNotSet", { file: DEFAULT_KEYS_FILE_NAME }),
+          t("keysPoolNotSet", { file: agentFile(DEFAULT_KEYS_FILE_NAME) }),
           "info",
         );
         return;
@@ -1226,7 +1229,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     const pool = proxyPool.refresh();
     proxyRotator.setPool(pool);
     if (!proxyPool.hasSource() && pool.length === 0) {
-      return t("proxyPoolNotSet", { file: DEFAULT_PROXIES_FILE_NAME });
+      return t("proxyPoolNotSet", { file: agentFile(DEFAULT_PROXIES_FILE_NAME) });
     }
     const now = Date.now();
     const errors = proxyPool.parseErrors();
@@ -1323,7 +1326,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     if (verb === "pin") {
       const ids = proxyPinIds();
       if (ids.length === 0) {
-        ctx.ui.notify(t("proxyPoolNotSet", { file: DEFAULT_PROXIES_FILE_NAME }), "info");
+        ctx.ui.notify(t("proxyPoolNotSet", { file: agentFile(DEFAULT_PROXIES_FILE_NAME) }), "info");
         return;
       }
       const id = verbRest.join(" ").trim();
@@ -1353,7 +1356,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         ctx.ui.notify(
           errors.length > 0
             ? t("proxyPoolIntroParseErrors", { source: proxyPool.describe(), errors: errors.join("; ") })
-            : t("proxyPoolNotSet", { file: DEFAULT_PROXIES_FILE_NAME }),
+            : t("proxyPoolNotSet", { file: agentFile(DEFAULT_PROXIES_FILE_NAME) }),
           "info",
         );
         return;

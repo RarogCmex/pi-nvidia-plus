@@ -263,9 +263,13 @@ export const MESSAGES = {
   },
 
   // ── Пул прокси: панель настроек `/nvidia-plus proxy` ──────────────────
+  // {file} — абсолютный путь, построенный `agentFile()` от каталога конфига пи
+  // (`getAgentDir()`), поэтому учитывает `$PI_CODING_AGENT_DIR`; не зашит как
+  // `~/.pi/agent/…`, чтобы сообщение не звало пользователя в каталог, который
+  // запущенный пи не читает.
   proxyPoolNotSet: {
-    en: 'pi-nvidia-plus: no proxy pool — set NVIDIA_NIM_PROXIES (comma-separated), or NVIDIA_NIM_PROXIES_FILE, or create ~/.pi/agent/{file} ({"proxies": ["http://…"]}); legacy single NVIDIA_NIM_PROXY still works',
-    ru: 'pi-nvidia-plus: пул прокси не задан — задайте NVIDIA_NIM_PROXIES (через запятую), или NVIDIA_NIM_PROXIES_FILE, или создайте ~/.pi/agent/{file} ({"proxies": ["http://…"]}); легаси-одиночка NVIDIA_NIM_PROXY по-прежнему работает',
+    en: 'pi-nvidia-plus: no proxy pool — set NVIDIA_NIM_PROXIES (comma-separated), or NVIDIA_NIM_PROXIES_FILE, or create {file} ({"proxies": ["http://…"]}); legacy single NVIDIA_NIM_PROXY still works',
+    ru: 'pi-nvidia-plus: пул прокси не задан — задайте NVIDIA_NIM_PROXIES (через запятую), или NVIDIA_NIM_PROXIES_FILE, или создайте {file} ({"proxies": ["http://…"]}); легаси-одиночка NVIDIA_NIM_PROXY по-прежнему работает',
   },
   proxyPanelSummary: {
     en: "pi-nvidia-plus: proxy ring {state}; pool {source} ({count}); pin {pin}{pinLatency}; {rows}{edit}{metrics}{parseErrors}",
@@ -543,9 +547,10 @@ export const MESSAGES = {
     en: "key from {source} did not resolve (no variable in {key}) — skipped",
     ru: "ключ из {source} не разрешился (нет переменной в {key}) — пропущен",
   },
+  // {file} — абсолютный путь из `agentFile()` (см. комментарий у proxyPoolNotSet).
   keysPoolNotSet: {
-    en: 'pi-nvidia-plus: no key pool — create ~/.pi/agent/{file} ({"keys": ["nvapi-…", …]}) or set NVIDIA_NIM_KEYS[_FILE]; rotation is inactive',
-    ru: 'pi-nvidia-plus: пул ключей не задан — создайте ~/.pi/agent/{file} ({"keys": ["nvapi-…", …]}) или задайте NVIDIA_NIM_KEYS[_FILE]; ротация не активна',
+    en: 'pi-nvidia-plus: no key pool — create {file} ({"keys": ["nvapi-…", …]}) or set NVIDIA_NIM_KEYS[_FILE]; rotation is inactive',
+    ru: 'pi-nvidia-plus: пул ключей не задан — создайте {file} ({"keys": ["nvapi-…", …]}) или задайте NVIDIA_NIM_KEYS[_FILE]; ротация не активна',
   },
   keysPiKeyMark: {
     en: " (pi key)",

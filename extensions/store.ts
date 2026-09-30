@@ -3,16 +3,24 @@
  *
  * Пути (директива пользователя, тикет 05):
  *  - желаемые оверрайды: `overrides/models.json` в пакете;
- *  - цель применения: `~/.pi/agent/models.json` (единственный путь, который
+ *  - цель применения: `<agentDir>/models.json` (единственный путь, который
  *    читает пи для метаданных);
- *  - леджер владения: `~/.pi/agent/nvidia-plus-models.json` — отдельный файл,
+ *  - леджер владения: `<agentDir>/nvidia-plus-models.json` — отдельный файл,
  *    чтобы не смешивать наши записи с пользовательскими;
  *  - перед каждой записью `models.json` создаётся бэкап `*.bak-pi-nvidia-plus`.
+ *
+ * `agentDir` — каталог конфига пи (`getAgentDir()`): `~/.pi/agent` по умолчанию и
+ * `$PI_CODING_AGENT_DIR`, если он задан. Так его резолвит сам пи (`getModelsPath()`
+ * в его `config.ts`), поэтому зашитый `homedir() + ".pi/agent"` был ошибкой: при
+ * нестандартном каталоге оверрайды ложились туда, куда запущенный пи не смотрит,
+ * и задевали чужой дефолтный каталог. Измерено 2026-09-30: прогон с
+ * `PI_CODING_AGENT_DIR=/tmp/…` не создал там `models.json`, а список моделей
+ * `nvidia` не отличался от запуска без расширения.
  */
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   applyOverrides,
   mergeModelsJson,
@@ -27,8 +35,14 @@ import {
 export const PROVIDER = "nvidia";
 
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_BASE_DIR = join(homedir(), ".pi", "agent");
 const DEFAULT_OVERRIDES_FILE = join(EXT_DIR, "..", "overrides", "models.json");
+
+/** Файл в каталоге конфига пи. Резолвится при каждом вызове, а не на импорте:
+ *  `$PI_CODING_AGENT_DIR` может быть задан позже (тесты), а rebranded-дистрибуция
+ *  меняет `CONFIG_DIR_NAME`. */
+export function agentFile(name: string): string {
+  return join(getAgentDir(), name);
+}
 
 /** Шов C: пути файлового слоя — параметром, дефолты для боевого запуска. */
 export interface StorePaths {
@@ -40,7 +54,7 @@ export interface StorePaths {
   discoveredFile: string;
 }
 
-export function storePaths(baseDir: string = DEFAULT_BASE_DIR, overridesFile: string = DEFAULT_OVERRIDES_FILE): StorePaths {
+export function storePaths(baseDir: string = getAgentDir(), overridesFile: string = DEFAULT_OVERRIDES_FILE): StorePaths {
   const modelsJson = join(baseDir, "models.json");
   return {
     overridesFile,
@@ -51,9 +65,15 @@ export function storePaths(baseDir: string = DEFAULT_BASE_DIR, overridesFile: st
   };
 }
 
-// Дефолтные пути — для сообщений пользователю во входной точке.
-export const MODELS_JSON = storePaths().modelsJson;
-export const STATE_FILE = storePaths().stateFile;
+// Пути для сообщений пользователю — функциями, а не константами уровня модуля:
+// сообщение обязано называть тот каталог, который читает ЗАПУЩЕННЫЙ пи, а не
+// снимок, снятый на импорте.
+export function modelsJsonPath(): string {
+  return storePaths().modelsJson;
+}
+export function stateFilePath(): string {
+  return storePaths().stateFile;
+}
 
 function readJson(path: string): unknown | undefined {
   if (!existsSync(path)) return undefined;

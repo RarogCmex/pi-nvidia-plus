@@ -1,13 +1,24 @@
 /**
  * Тесты шва C: файловый слой с параметризованными путями (extensions/store.ts).
  * Запуск: node test/store.test.ts
- * Все пробы — во временном каталоге; реальный `~/.pi/agent` не трогается.
+ * Все пробы — во временном каталоге; реальный `~/.pi/agent` не трогается
+ * (блок 1b только резолвит пути при подменённом `$PI_CODING_AGENT_DIR`, не пишет).
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyFiles, rollbackFiles, loadState, storePaths, type StorePaths } from "../extensions/store.ts";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import {
+  agentFile,
+  applyFiles,
+  modelsJsonPath,
+  rollbackFiles,
+  loadState,
+  stateFilePath,
+  storePaths,
+  type StorePaths,
+} from "../extensions/store.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "pi-nvidia-plus-store-"));
 
@@ -39,7 +50,7 @@ function readModels(paths: StorePaths): any {
   return JSON.parse(readFileSync(paths.modelsJson, "utf8"));
 }
 
-// 1. Пути строятся от базового каталога; дефолты — как раньше (~/.pi/agent).
+// 1. Пути строятся от базового каталога; дефолт — каталог конфига пи.
 // База произвольная; ожидания собираем через join, а не строковыми
 // литералами с "/" — иначе на Windows сравнение упадёт из-за разделителей.
 const base = join("tmp", "base");
@@ -47,8 +58,38 @@ const paths = storePaths(base);
 assert.equal(paths.modelsJson, join(base, "models.json"));
 assert.equal(paths.stateFile, join(base, "nvidia-plus-models.json"));
 assert.equal(paths.backupFile, join(base, "models.json.bak-pi-nvidia-plus"));
+
+// 1a. Дефолт — `getAgentDir()`, а не зашитый `~/.pi/agent`. Без окружения это
+// одно и то же, поэтому прежнее `endsWith(".pi/agent/models.json")` проходило в
+// обоих случаях: оно не различало «берёт каталог у пи» и «пишет в домашний».
 const defaults = storePaths();
+assert.equal(defaults.modelsJson, join(getAgentDir(), "models.json"));
 assert.ok(defaults.modelsJson.endsWith(join(".pi", "agent", "models.json")), "дефолт сменился");
+
+// 1b. `$PI_CODING_AGENT_DIR` меняет все дефолты — и пути записи, и пути в
+// сообщениях пользователю (иначе команда называет один каталог, а пишет в другой).
+// Регресс измерен 2026-09-30: при изолированном конфиге расширение применяло
+// оверрайды в настоящий `~/.pi/agent`, который запущенный пи не читал.
+{
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  const custom = freshDir("agent-dir-override");
+  try {
+    process.env.PI_CODING_AGENT_DIR = custom;
+    const p = storePaths();
+    assert.equal(p.modelsJson, join(custom, "models.json"));
+    assert.equal(p.stateFile, join(custom, "nvidia-plus-models.json"));
+    assert.equal(p.discoveredFile, join(custom, "nvidia-plus-discovered.json"));
+    assert.equal(modelsJsonPath(), join(custom, "models.json"));
+    assert.equal(stateFilePath(), join(custom, "nvidia-plus-models.json"));
+    assert.equal(agentFile("nvidia-keys.json"), join(custom, "nvidia-keys.json"));
+    assert.equal(agentFile("nvidia-proxies.json"), join(custom, "nvidia-proxies.json"));
+    assert.equal(agentFile("nvidia-plus-debug.log"), join(custom, "nvidia-plus-debug.log"));
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+  }
+  assert.equal(storePaths().modelsJson, join(getAgentDir(), "models.json"), "окружение не восстановлено");
+}
 
 // 2. Применение в чистый каталог создаёт models.json и леджер; повтор — идемпотентен.
 {
