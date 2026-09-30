@@ -234,7 +234,9 @@ so npm, nvm, pnpm and user-prefix installs all work; on Windows it creates
 junctions. To point at a specific install:
 `PI_ROOT=/path/to/node_modules node scripts/link-pi.mjs`.
 
-Verified against pi 0.87.1 / Node 26.
+Verified against pi 0.87.1 / Node 26, and re-verified on pi 0.99.1 (2026-09-30):
+same bundled undici 8.10.2 and `@types/node` 22.19.19, Node 26.10 — typecheck plus
+all 21 test files green.
 
 `npm install` is **not** needed for `npm run check` — `link-pi.mjs` provides
 everything the typecheck and the tests resolve, which is pi's types and **pi's own
