@@ -41,6 +41,8 @@ node scripts/link-pi.mjs   # only for dev (tests / typecheck)
 
 The extension self-applies its model overrides on first session start (into `~/.pi/agent/models.json`, ledger in `~/.pi/agent/nvidia-plus-models.json`). It never overwrites your manual edits without `force`.
 
+Every `~/.pi/agent/…` path in this README means **pi's agent dir**, resolved with pi's own `getAgentDir()`: `$PI_CODING_AGENT_DIR` when set, `~/.pi/agent` otherwise (a rebranded pi distribution changes the default too). The extension reads and writes only that directory — it does not hardcode your home directory, so it works under an alternate config dir and never touches the default one behind your back.
+
 ## Authentication
 
 The extension registers **no provider and no credential of its own** — it uses
@@ -136,7 +138,7 @@ Tab-completion covers subcommands and their arguments (including `proxy pin <hos
 | `NVIDIA_NIM_KEY_ROTATION` | `0`/`false`/`no`/`off` disables rotation. Default: enabled when a pool is configured. |
 | `NVIDIA_NIM_SHARED_ROTATION` | `0` disables cross-process shared state (`~/.pi/agent/nvidia-keys-state.json`). Default: enabled. |
 | `NVIDIA_NIM_TRANSPORT_RETRY` | `0` disables transparent retries — both 429/5xx **and** in-band `Service temporarily overloaded` (HTTP 200 + SSE error event). Default: enabled (3 retries each). |
-| `PI_NVIDIA_PLUS_DEBUG` | `1` writes final payloads to `~/.pi/nvidia-plus-debug.log`. |
+| `PI_NVIDIA_PLUS_DEBUG` | `1` writes final payloads to `nvidia-plus-debug.log` in pi's agent dir (`~/.pi/agent/` by default). |
 | `PI_NVIDIA_PLUS_LANG` | `ru` or `en`. Overrides `LC_ALL` / `LC_MESSAGES` / `LANG` detection. |
 
 ### Key pool file
@@ -195,7 +197,8 @@ mechanics — is written up in [`research/`](research/); start at
   `overrides/models.json` still gets request-level injection if its family
   matches, but pi's UI will not offer a thinking selector for it until the
   override adds `reasoning: true` + `thinkingLevelMap`.
-- **Side files in `~/.pi/agent/`.** `nvidia-plus-models.json` (the ownership
+- **Side files in pi's agent dir** (`~/.pi/agent/` by default, `$PI_CODING_AGENT_DIR`
+  when set). `nvidia-plus-models.json` (the ownership
   ledger), `nvidia-plus-discovered.json` (discover results),
   `models.json.bak-pi-nvidia-plus` (pre-apply backup), `nvidia-keys-state.json`
   and `nvidia-proxies-state.json` (cross-process shared state). `/nvidia-plus

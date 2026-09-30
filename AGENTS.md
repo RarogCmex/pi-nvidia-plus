@@ -22,8 +22,11 @@
   сессионные счётчики; `extensions/stream-errors.ts` — классификация
   оборванного SSE-потока.
 - `extensions/merge-models.ts`, `extensions/store.ts` — идемпотентное
-  применение оверрайдов в `~/.pi/agent/models.json` с леджером владения
-  (только свои `id`); `overrides/models.json` — сами оверрайды.
+  применение оверрайдов в `<agentDir>/models.json` с леджером владения
+  (только свои `id`); `overrides/models.json` — сами оверрайды. `agentDir` —
+  каталог конфига пи из `getAgentDir()` (`$PI_CODING_AGENT_DIR`, иначе
+  `~/.pi/agent`); **не** зашивать `homedir() + ".pi/agent"` — иначе при
+  нестандартном каталоге пи не увидит применённые оверрайды.
 - `extensions/i18n.ts` — все пользовательские строки в двух языках.
 - `extensions/discovery.ts`, `extensions/commands.ts` — живое
   `GET /v1/models` и таблица дополнений команд.
