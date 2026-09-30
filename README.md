@@ -238,6 +238,11 @@ Verified against pi 0.87.1 / Node 26, and re-verified on pi 0.99.1 (2026-09-30):
 same bundled undici 8.10.2 and `@types/node` 22.19.19, Node 26.10 — typecheck plus
 all 21 test files green.
 
+`npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
+devDependency (`link-pi.mjs` links pi's packages and undici), so TypeScript must
+be on your `PATH`: `npm i -g typescript@5.9.3` — the version CI pins
+(`.github/workflows/check.yml`); 7.0.2 also typechecks clean (measured 2026-09-30).
+
 `npm install` is **not** needed for `npm run check` — `link-pi.mjs` provides
 everything the typecheck and the tests resolve, which is pi's types and **pi's own
 undici**. Linking undici rather than installing it matters: the extension installs
