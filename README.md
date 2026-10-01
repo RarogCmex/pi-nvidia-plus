@@ -221,6 +221,32 @@ NVIDIA_API_KEY=nvapi-… PROXY_AB_LIST='[{"name":"a","url":"http://host:1080","t
   npm run bench:proxies        # A/B the same probe set across several exits
 ```
 
+One acceptance script spends nothing, needs no network, and runs in CI on every
+push — so it is safe to run by hand:
+
+```bash
+PI_CODING_AGENT_DIR=$(mktemp -d) npm run acceptance:agent-dir
+```
+
+It starts a real `pi --list-models nvidia` twice — without the extension
+(the control: it proves `models.json` is ours, not pi's) and with it — then
+asserts on what landed on disk: the ownership ledger must exist with
+`enabled: true`, the number of applied overrides must equal the number in
+`overrides/models.json` (today 10; the assertion reads the file rather than
+hardcoding the count), and `$HOME/.pi/agent` must be unchanged, file by file,
+name+size+mtime. The script refuses to start if `PI_CODING_AGENT_DIR` is unset
+or overlaps the real agent dir, so it cannot be pointed at a live config by
+accident.
+
+This is the class of defect the unit tests cannot see: `test/store.test.ts`
+resolves paths under a substituted `$PI_CODING_AGENT_DIR` but never writes, and
+before v0.2.2 the store hardcoded `homedir() + ".pi/agent"` — a pi started with a
+non-default config dir got no overrides *and* the user's real `models.json` was
+touched. Putting that hardcode back reddens 3 of the 4 assertions (measured
+2026-10-01). The runs use `--offline` because applying overrides needs no
+network: the `--list-models` output and the set of written files are
+byte-identical with and without the flag.
+
 Tests and typecheck need pi's own types, which are not dependencies of this
 package (pi aliases them at load time). Link your global pi install once:
 
