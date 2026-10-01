@@ -70,3 +70,25 @@ jobs:
 
       - name: Typecheck and test
         run: npm run check
+
+      # Приёмка класса F2 (подробности в шапке scripts/agent-dir-acceptance.mjs):
+      # настоящий `pi` с настоящим хуком, а не юнит-резолв путей. До v0.2.2
+      # расширение писало оверрайды в зашитый `homedir() + ".pi/agent"`, то есть
+      # мимо каталога, который указал пи, и задевало чужой дефолтный каталог;
+      # `test/store.test.ts` (блок 1b) этого не ловил, потому что проверяет
+      # резолв путей, а не запись на диск. Шаг запускает пи дважды — без
+      # расширения (контроль: `models.json` создаём мы, а не пи) и с ним — и
+      # сверяет, что реально появилось в `$PI_CODING_AGENT_DIR` и что дефолтный
+      # каталог не изменился. `--offline`, потому что применение оверрайдов сети
+      # не требует: измерено 2026-10-01, вывод `--list-models` и состав файлов с
+      # `--offline` и без него совпадают побайтово (10 оверрайдов, enabled:true).
+      #
+      # Положительный контроль проведён там же: возврат `homedir()` в `agentFile()`
+      # и в дефолт `storePaths()` красит 3 из 4 утверждений (exit 1).
+      - name: Acceptance — the extension writes into PI_CODING_AGENT_DIR only
+        env:
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/nvidia-plus-acceptance
+          # Ключ заведомо недействительный: шаг офлайн и не тратит квоту, но
+          # `--list-models` ожидает креденшел правильной формы.
+          NVIDIA_API_KEY: nvci-invalid-key-00000000
+        run: node scripts/agent-dir-acceptance.mjs

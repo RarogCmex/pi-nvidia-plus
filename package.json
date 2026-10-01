@@ -34,6 +34,7 @@
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "npm run typecheck && npm test",
     "acceptance:proxy-pool": "node scripts/proxy-pool-acceptance.mjs",
+    "acceptance:agent-dir": "node scripts/agent-dir-acceptance.mjs",
     "discover": "node scripts/discover-models.mjs",
     "bench:proxies": "node scripts/test-proxies.mjs"
   },
