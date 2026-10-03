@@ -260,9 +260,12 @@ so npm, nvm, pnpm and user-prefix installs all work; on Windows it creates
 junctions. To point at a specific install:
 `PI_ROOT=/path/to/node_modules node scripts/link-pi.mjs`.
 
-Verified against pi 0.87.1 / Node 26, and re-verified on pi 0.99.1 (2026-09-30):
-same bundled undici 8.10.2 and `@types/node` 22.19.19, Node 26.10 — typecheck plus
-all 21 test files green.
+Verified against pi 0.87.1 / Node 26, re-verified on pi 0.99.1 (2026-09-30) and on
+pi 1.0.0 (2026-10-03): same bundled undici 8.10.2 and `@types/node` 22.19.19,
+Node 26.10 — typecheck plus all 21 test files green on both. Loading on 1.0.0 was
+checked in an isolated `PI_CODING_AGENT_DIR`: `models.json` and
+`nvidia-plus-models.json` appear there and `--list-models nvidia` still prints the
+19 built-in models (this extension is hook-only, so the list is not the signal).
 
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
 devDependency (`link-pi.mjs` links pi's packages and undici), so TypeScript must
