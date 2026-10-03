@@ -28,7 +28,7 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
 
 ## Installation
 
-Requirements: **Node ≥ 22.18** (runs TypeScript directly — type stripping and `.ts` test discovery are unflagged from 22.18; Node 24+ also works) and [pi](https://github.com/earendil-works/pi) installed.
+Requirements: **Node ≥ 22.19** — the floor is the host's: pi's own `engines.node` is `>=22.19.0` (measured on 0.87.0 and 1.0.0). TypeScript runs directly (type stripping and `.ts` test discovery are unflagged from 22.18; Node 24+ also works) and [pi](https://github.com/earendil-works/pi) must be installed.
 
 ```bash
 pi install git:github.com/RarogCmex/pi-nvidia-plus@main

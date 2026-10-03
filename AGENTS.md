@@ -76,6 +76,7 @@ npm run check              # typecheck + офлайн-тесты — обяза�
 - **Гейт по провайдеру.** Каждый обработчик проверяет `provider === "nvidia"`;
   на чужих провайдерах расширение себя не проявляет. `models.json` трогается
   только в провайдере `nvidia` и только по своему леджеру.
-- Node ≥ 22.18 (нативный type-stripping), ESM, strict TS без эмита: сборки нет,
+- Node ≥ 22.19 (границу задаёт pi: `engines.node` `>=22.19.0`, измерено на 0.87.0 и
+  1.0.0; type-stripping без флага — с 22.18), ESM, strict TS без эмита: сборки нет,
   pi исполняет `.ts` напрямую. Linux / macOS / Windows — пути только через
   `node:os` `homedir()` + `node:path` `join()`.
