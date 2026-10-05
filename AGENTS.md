@@ -11,7 +11,9 @@
 ## Структура
 
 - `extensions/pi-nvidia-plus.ts` — входная точка: регистрация команды
-  `/nvidia-plus`, хуки, наблюдатель диспетчера, список мёртвых моделей.
+  `/nvidia-plus`, хуки, наблюдатель диспетчера.
+- `extensions/dead-models.ts` — таблица мёртвых моделей (данные; импортируют
+  и входная точка, и `scripts/discover-models.mjs` — копия бы разошлась).
 - `extensions/transform.ts` — чистый шов: трансформация пейлоада
   (thinking по семействам, нормализация контента, дефолтный `max_tokens`).
   Без pi и без сети.
@@ -20,7 +22,9 @@
   пиннинг, SOCKS5.
 - `extensions/keys.ts` — пул ключей и ротация; `extensions/metrics.ts` —
   сессионные счётчики; `extensions/stream-errors.ts` — классификация
-  оборванного SSE-потока.
+  оборванного SSE-потока; `extensions/degenerate.ts` — классификация
+  дегенеративного вывода при HTTP 200 (коллапс повторений, утечка токена,
+  пустой ответ; исследование 06, §3–4).
 - `extensions/merge-models.ts`, `extensions/store.ts` — идемпотентное
   применение оверрайдов в `<agentDir>/models.json` с леджером владения
   (только свои `id`); `overrides/models.json` — сами оверрайды. `agentDir` —

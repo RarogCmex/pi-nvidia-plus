@@ -169,6 +169,10 @@ export const MESSAGES = {
     en: "truncated streams: {n}",
     ru: "оборванных потоков: {n}",
   },
+  metricsGroupDegenerateResponses: {
+    en: "degenerate responses: {n}",
+    ru: "дегенеративных ответов: {n}",
+  },
   proxyUndiciNotFound: {
     en: "could not locate pi's undici (bases: {bases})",
     ru: "не удалось найти undici пи (базы: {bases})",
@@ -434,6 +438,33 @@ export const MESSAGES = {
   streamTruncated: {
     en: "NIM ended the stream without finish_reason (model {modelId}) — pi's retries did not help, the response is truncated. Typical causes: gateway timeout on a long thinking output, flaky proxy exit. Try a lower thinking level, another exit (/nvidia-plus proxy), or simply repeat the request.",
     ru: "NIM оборвал поток без finish_reason (модель {modelId}) — повторы пи не помогли, ответ усечён. Типичные причины: таймаут шлюза на длинном выводе мышления, нестабильный выход прокси. Попробуйте снизить уровень мышления, сменить выход (/nvidia-plus proxy) или просто повторить запрос.",
+  },
+  // Дегенеративный вывод при HTTP 200 (исследование 06, §3–4): поток не оборван,
+  // finish_reason есть, но содержимое — брак. Отказ интермиттирующий: повтор
+  // обычно помогает, а max_tokens ни при чём — поэтому подсказка «повторите».
+  degenerateWhereText: {
+    en: "the response",
+    ru: "ответе",
+  },
+  degenerateWhereThinking: {
+    en: "the reasoning channel",
+    ru: "канале рассуждения",
+  },
+  degenerateCollapse: {
+    en: "Model {modelId} returned degenerate output — a repetition collapse in {where} — with a successful HTTP 200 and finish_reason. The response is unusable; this failure is intermittent, so simply repeat the request. Raising max_tokens will not help.",
+    ru: "Модель {modelId} вернула дегенеративный вывод — коллапс повторений в «{where}» — при успешном HTTP 200 и finish_reason. Ответ непригоден; отказ интермиттирующий, поэтому просто повторите запрос. Увеличение max_tokens не поможет.",
+  },
+  degenerateTokenLeak: {
+    en: "Model {modelId} leaked a special token ({token}) into its output — the chat template is broken on the server side. The response is unusable; repeat the request or pick another model.",
+    ru: "Модель {modelId} пропустила в вывод special-токен ({token}) — chat-template сломан на стороне сервера. Ответ непригоден; повторите запрос или выберите другую модель.",
+  },
+  degenerateEmptyStop: {
+    en: "Model {modelId} finished with an empty response (finish_reason: stop) — the reasoning channel degenerated, the token budget was NOT exhausted. Repeat the request; raising max_tokens is the wrong fix here.",
+    ru: "Модель {modelId} закончила пустым ответом (finish_reason: stop) — дегенерация канала рассуждения, бюджет токенов НЕ исчерпан. Повторите запрос; поднимать max_tokens здесь неверно.",
+  },
+  degenerateEmptyLength: {
+    en: "Model {modelId} produced no visible text: the token budget was consumed by reasoning (finish_reason: length). Raise max_tokens or lower the thinking level.",
+    ru: "Модель {modelId} не дала видимого текста: бюджет токенов съеден рассуждением (finish_reason: length). Поднимите max_tokens или снизьте уровень мышления.",
   },
   retryScheduledOverloaded: {
     en: "NIM 503 (Service temporarily overloaded): retrying transparently (attempt {attempt} of {total}, in {seconds}s)",

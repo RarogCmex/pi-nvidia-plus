@@ -3,12 +3,31 @@
  * Standalone model discovery script for pi-nvidia-plus.
  * Fetches live models from NVIDIA API and classifies them against the known catalog.
  * Uses the same logic as the `/nvidia-plus discover` command.
- * 
+ *
+ * Классификация и таблица мёртвых моделей ИМПОРТИРУЮТСЯ из `extensions/*.ts`
+ * (Node ≥ 22.19 исполняет TypeScript напрямую, type-stripping без флага) —
+ * прежние копии рассинхронизировались (исследование 06, §2: `starcoder` жил
+ * в discovery.ts, но не здесь).
+ *
  * Usage:
- *   node scripts/discover-models.mjs
- * 
+ *   node scripts/discover-models.mjs [--probe-routes] [--probe-eol] [--direct]
+ *
+ *   --direct        ignore proxy configuration and go to NIM directly
+ *
+ * Flags (both keyless — no `authorization` header, no key quota is spent;
+ * NIM resolves the model before auth, see research/06-gateway-recon-keyless-oracles.md §1):
+ *   --probe-routes  probe every live model with a keyless POST /v1/chat/completions
+ *                   and report the chat-route ground truth:
+ *                     404 (text/plain)          — no chat route at all
+ *                     401                       — chat route exists
+ *                     410 (application/problem+json) — EOL, exact date extracted
+ *                   Flags heuristic false positives (models `isChatModel()` passes
+ *                   but the oracle says have no chat route). ~150 ms pacing.
+ *   --probe-eol     probe DEAD_MODELS ids keyless and print exact EOL dates,
+ *                   plus any mismatch against the table (evidence for updating it).
+ *
  * Environment variables:
- *   NVIDIA_API_KEY - API key for authentication (optional, but recommended)
+ *   NVIDIA_API_KEY - API key for authentication (optional; only used for GET /v1/models)
  *   NVIDIA_NIM_PROXY - Proxy URL (e.g., http://127.0.0.1:8870)
  *   NVIDIA_NIM_PROXIES - Comma-separated list of proxy URLs
  *   NVIDIA_NIM_PROXIES_FILE - Path to proxy pool file
@@ -18,112 +37,14 @@ import { fetch, ProxyAgent } from "undici";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parseModelsResponse, isChatModel } from "../extensions/discovery.ts";
+import { DEAD_MODELS } from "../extensions/dead-models.ts";
 
 const NVIDIA_ORIGIN = "https://integrate.api.nvidia.com";
+const PROBE_PACING_MS = 150;
 
-// ─── Copied/ported from extensions/discovery.ts ────────────────────────────
-// ВНИМАНИЕ: это копия, а не импорт — скрипт работает без pi и без TypeScript.
-// Правя классификацию в extensions/discovery.ts, поправь и здесь, иначе
-// `node scripts/discover-models.mjs` и `/nvidia-plus discover` разойдутся.
-// Тесты покрывают только extensions/discovery.ts (test/discovery.test.ts).
-
-function isRecord(value) {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-function parseModelsResponse(payload) {
-  let items;
-  if (Array.isArray(payload)) {
-    items = payload;
-  } else if (isRecord(payload)) {
-    if (Array.isArray(payload.data)) items = payload.data;
-    else if (Array.isArray(payload.models)) items = payload.models;
-  }
-  if (!Array.isArray(items)) return [];
-
-  const seen = new Set();
-  const out = [];
-  for (const item of items) {
-    if (!isRecord(item)) continue;
-    const id = item.id;
-    if (typeof id !== "string" || id.trim().length === 0) continue;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    out.push({
-      id,
-      ownedBy: typeof item.owned_by === "string" ? item.owned_by : undefined,
-    });
-  }
-  return out;
-}
-
-const NON_CHAT_PATTERNS = [
-  /embed/i,
-  /rerank/i,
-  /\breward\b/i,
-  /guard/i,
-  /content-safety/i,
-  /topic-control/i,
-  /translate/i,
-  /\bparse(r)?\b/i,
-  /detector/i,
-  /calibration/i,
-  /\bdeplot\b/i,
-  /\bocr\b/i,
-  /clip/i,
-  /\b(tts|asr|whisper|speech)\b/i,
-  /(stable-?diffusion|sdxl|\bflux\b|dall-?e|imagen|image-?gen)/i,
-];
-
-function isChatModel(id) {
-  return !NON_CHAT_PATTERNS.some((pattern) => pattern.test(id));
-}
-
-// ─── Dead models list from pi-nvidia-plus.ts ───────────────────────────────
-
-const DEAD_MODELS = {
-  "meta/llama-3.1-70b-instruct": "410 EOL",
-  "meta/llama-3.1-8b-instruct": "410 EOL",
-  "meta/llama-3.3-70b-instruct": "410 EOL",
-  "nvidia/llama-3.1-nemotron-nano-8b-v1": "410 EOL",
-  "nvidia/llama-3.1-nemotron-nano-vl-8b-v1": "410 EOL",
-  "nvidia/llama-3.3-nemotron-super-49b-v1": "410 EOL",
-  "nvidia/llama-3.3-nemotron-super-49b-v1.5": "410 EOL",
-  "nvidia/nemotron-nano-12b-v2-vl": "410 EOL",
-  "nvidia/nvidia-nemotron-nano-9b-v2": "410 EOL",
-  "thinkingmachines/inkling": "410 EOL",
-  "deepseek-ai/deepseek-v4-flash-0731": "EOL announced: deprecated 2026-09-19, unsupported after 2026-09-21 per build.nvidia.com; chat probes hang (2026-09-18)",
-  "deepseek-ai/deepseek-v4-pro-0813": "410 EOL (probe 2026-09-18)",
-  "minimaxai/minimax-m3": "410 EOL (probe 2026-09-18)",
-  "meta/muse-glimmer-30b": "404 on probe 2026-09-18 (was alive)",
-  "google/gemma-3-4b-it": "404 in all probes",
-  "google/gemma-3-12b-it": "404 in all probes",
-  "mistralai/mistral-7b-instruct-v0.3": "404 in all probes",
-  "moonshotai/kimi-k2.6": "404 in all probes",
-  "nvidia/cosmos-reason2-8b": "404 in all probes",
-  "nvidia/llama-3.1-nemotron-70b-instruct": "404 in all probes (re-check ticket 08)",
-  "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in all probes",
-  "nvidia/nemotron-3-nano-30b-a3b": "410 EOL (probe 2026-09-18)",
-  "openai/gpt-oss-120b": "410 EOL (probe 2026-09-18)",
-  "stepfun-ai/step-3.7-flash": "410 EOL (probe 2026-09-18)",
-  "01-ai/yi-large": "404 in all probes (audit 02)",
-  "ai21labs/jamba-1.5-large-instruct": "404 in all probes (audit 02)",
-  "databricks/dbrx-instruct": "404 in all probes (audit 02)",
-  "deepseek-ai/deepseek-v4-flash": "410 EOL (audit 02)",
-  "deepseek-ai/deepseek-v4-pro": "410 EOL (audit 02)",
-  "microsoft/phi-3-vision-128k-instruct": "404 in all probes (audit 02)",
-  "microsoft/phi-3.5-moe-instruct": "404 in all probes (audit 02)",
-  "mistralai/codestral-22b-instruct-v0.1": "404 in all probes (audit 02)",
-  "mistralai/mistral-large": "404 in all probes (audit 02)",
-  "mistralai/mistral-large-2-instruct": "404 in all probes (audit 02)",
-  "mistralai/mixtral-8x22b-v0.1": "404 in all probes (audit 02)",
-  "nvidia/llama-3.1-nemotron-51b-instruct": "404 in all probes (audit 02)",
-  "nvidia/nemotron-4-340b-instruct": "404 in all probes (audit 02)",
-  "nvidia/nemotron-mini-4b-instruct": "410 EOL (audit 02)",
-  "nvidia/nemotron-nano-3-30b-a3b": "404 in all probes (audit 02)",
-  "nvidia/vila": "404 in all probes (audit 02)",
-  "writer/palmyra-creative-122b": "404 in all probes (audit 02)",
-};
+// ─── Dead models list from extensions/dead-models.ts ───────────────────────
+// Импорт выше; отдельной копии больше нет — таблица одна на расширение и скрипт.
 
 // ─── Proxy handling ────────────────────────────────────────────────────────
 
@@ -221,9 +142,110 @@ function loadKnownModels() {
   }
 }
 
+// ─── Keyless oracle (research/06, §1) ──────────────────────────────────────
+// NIM резолвит модель ДО проверки авторизации, поэтому POST /v1/chat/completions
+// без заголовка `authorization` различает три исхода:
+//   404 (text/plain `404 page not found`)     — chat-роута у модели нет вообще;
+//   401                                        — chat-роут есть (живость не определяется);
+//   410 (application/problem+json)             — модель снята с публикации, точная дата EOL.
+// Ключ не нужен и квота не тратится. Границы оракула — исследование 06, §1:
+// живость чат-модели он НЕ определяет, а 404 авторизованных проб (слой NVCF)
+// не подтверждает: такие модели keyless-ом дают 401.
+
+async function probeKeylessRoute(id, dispatcher) {
+  try {
+    const res = await fetch(`${NVIDIA_ORIGIN}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" }, // намеренно без authorization
+      body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+      dispatcher,
+      signal: AbortSignal.timeout(15000),
+    });
+    const ct = res.headers.get("content-type") ?? "";
+    const body = await res.text();
+    if (res.status === 410 && ct.includes("application/problem+json")) {
+      const m = body.match(/end of life on (\d{4}-\d{2}-\d{2})T/);
+      return { outcome: "eol", status: 410, eolDate: m ? m[1] : undefined };
+    }
+    if (res.status === 404 && ct.includes("text/plain")) return { outcome: "no-route", status: 404 };
+    if (res.status === 401) return { outcome: "route", status: 401 };
+    return { outcome: "unknown", status: res.status };
+  } catch (e) {
+    return { outcome: "error", error: String(e?.message ?? e).slice(0, 120) };
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function probeRoutes(liveModels, dispatcher) {
+  console.log(`\n🔑 Keyless route probe (${liveModels.length} models, ~${Math.round((liveModels.length * PROBE_PACING_MS) / 1000)}s pacing)...`);
+  const results = new Map();
+  for (const model of liveModels) {
+    const r = await probeKeylessRoute(model.id, dispatcher);
+    results.set(model.id, r);
+    const mark = r.outcome === "no-route" ? "✗" : r.outcome === "eol" ? "💀" : r.outcome === "route" ? "✓" : "?";
+    console.log(`   ${mark} ${model.id} — ${r.outcome}${r.eolDate ? ` (EOL ${r.eolDate})` : ""}${r.status ? ` [HTTP ${r.status}]` : ""}${r.error ? ` ${r.error}` : ""}`);
+    await sleep(PROBE_PACING_MS);
+  }
+  // Сверка эвристики с ground truth (исследование 06, §2).
+  const falsePositives = []; // эвристика пускает в чат, а роута нет
+  const eol = [];            // ещё в каталоге, но уже 410
+  for (const model of liveModels) {
+    const r = results.get(model.id);
+    if (r?.outcome === "no-route" && isChatModel(model.id)) falsePositives.push(model.id);
+    if (r?.outcome === "eol") eol.push({ id: model.id, eolDate: r.eolDate });
+  }
+  console.log("\n📐 HEURISTIC vs ORACLE");
+  if (falsePositives.length === 0) {
+    console.log("   ✅ no false positives: every model isChatModel() passes has a chat route");
+  } else {
+    console.log("   ⚠️  FALSE POSITIVES (heuristic passes, oracle says no chat route):");
+    for (const id of falsePositives) console.log(`      ${id} — add a narrow pattern to NON_CHAT_PATTERNS`);
+  }
+  if (eol.length > 0) {
+    console.log("   💀 IN CATALOG BUT EOL (410):");
+    for (const { id, eolDate } of eol) console.log(`      ${id} — EOL ${eolDate ?? "?"}`);
+  }
+  const noRoute = [...results.values()].filter((r) => r.outcome === "no-route").length;
+  const route = [...results.values()].filter((r) => r.outcome === "route").length;
+  console.log(`   totals: route=${route}, no-route=${noRoute}, eol=${eol.length}, other=${results.size - route - noRoute - eol.length}`);
+  return results;
+}
+
+async function probeEol(dispatcher) {
+  const ids = Object.keys(DEAD_MODELS);
+  console.log(`\n💀 Keyless EOL probe of DEAD_MODELS (${ids.length} ids)...`);
+  const mismatches = [];
+  let dated = 0;
+  for (const id of ids) {
+    const r = await probeKeylessRoute(id, dispatcher);
+    const reason = DEAD_MODELS[id];
+    const reasonDate = /(\d{4}-\d{2}-\d{2})/.exec(reason)?.[1];
+    if (r.outcome === "eol") {
+      dated++;
+      const ok = reasonDate === r.eolDate || (r.eolDate && reason.includes(r.eolDate));
+      console.log(`   ${ok ? "✅" : "⚠️ "} ${id} — EOL ${r.eolDate ?? "?"} (table: ${reason})`);
+      if (!ok) mismatches.push({ id, eolDate: r.eolDate, reason });
+    } else {
+      console.log(`   ➖ ${id} — ${r.outcome}${r.status ? ` [HTTP ${r.status}]` : ""} (table: ${reason})`);
+    }
+    await sleep(PROBE_PACING_MS);
+  }
+  console.log(`\n   410 with exact date: ${dated}/${ids.length}`);
+  if (mismatches.length > 0) {
+    console.log("   ⚠️  MISMATCHES — update extensions/dead-models.ts:");
+    for (const m of mismatches) console.log(`      ${m.id}: oracle EOL ${m.eolDate}, table says «${m.reason}»`);
+  }
+  console.log("   note: 401 here means the HTTP route is alive — it does NOT contradict");
+  console.log("   «404 in every probe» entries (that 404 is the NVCF function layer, research/06 §6.2).");
+}
+
 // ─── Discovery logic ───────────────────────────────────────────────────────
 
 async function discoverModels() {
+  const probeRoutesFlag = process.argv.includes("--probe-routes");
+  const probeEolFlag = process.argv.includes("--probe-eol");
+
   console.log("╔══════════════════════════════════════════════════════════════════╗");
   console.log("║  pi-nvidia-plus Model Discovery                                  ║");
   console.log("╚══════════════════════════════════════════════════════════════════╝\n");
@@ -234,8 +256,11 @@ async function discoverModels() {
   console.log(`💀 Known dead models: ${deadIds.length}\n`);
 
   // Setup proxy
-  const dispatcher = getProxyDispatcher();
-  if (dispatcher) {
+  const directFlag = process.argv.includes("--direct");
+  const dispatcher = directFlag ? undefined : getProxyDispatcher();
+  if (directFlag) {
+    console.log("🌐 --direct: ignoring proxy configuration");
+  } else if (dispatcher) {
     console.log("🌐 Using proxy for discovery");
   } else {
     console.log("🌐 No proxy configured (direct connection)");
@@ -355,6 +380,10 @@ async function discoverModels() {
     const mark = isNew ? " ✨" : isDead ? " 💀" : "";
     console.log(`   ${id}${mark}`);
   }
+
+  // Keyless oracles (no key, no quota — research/06, §1)
+  if (probeRoutesFlag) await probeRoutes(liveModels, dispatcher);
+  if (probeEolFlag) await probeEol(dispatcher);
 
   return {
     live: liveModels.length,

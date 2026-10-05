@@ -65,6 +65,8 @@ import {
 } from "./proxy-pool.ts";
 import { classifyKeyProbeStatus, keyCheckUnknownSample, type KeyCheckOutcome } from "./key-check.ts";
 import { isTruncatedStreamError } from "./stream-errors.ts";
+import { classifyDegenerate, toDegenerateSource, type DegenerateVerdict } from "./degenerate.ts";
+import { DEAD_MODELS } from "./dead-models.ts";
 import { SessionMetrics } from "./metrics.ts";
 import { t } from "./i18n.ts";
 import { completeArgs, formatCommandLine, nvidiaPlusArgSuggestions, nvidiaPlusCommands, setDynamicPinIds } from "./commands.ts";
@@ -91,7 +93,9 @@ const metrics = new SessionMetrics();
 function metricsSummary(): string {
   // Обрыв потока виден и без транспортного наблюдения (нет пула/прокси —
   // ответов в счётчике нет, а message_end всё равно ловит ошибку).
-  if (metrics.totalResponses() === 0 && metrics.truncatedStreams === 0) return t("metricsNoResponses");
+  if (metrics.totalResponses() === 0 && metrics.truncatedStreams === 0 && metrics.degenerateResponses === 0) {
+    return t("metricsNoResponses");
+  }
   const { responses, groups } = metrics.formatParts();
   const groupLabels: Record<string, string> = {
     retries: t("metricsGroupRetries", { n: metrics.retries }),
@@ -101,6 +105,7 @@ function metricsSummary(): string {
     cooldownWaits: t("metricsGroupCooldownWaits", { n: metrics.cooldownWaits }),
     proxySwitches: t("metricsGroupProxySwitches", { n: metrics.proxySwitches }),
     truncatedStreams: t("metricsGroupTruncatedStreams", { n: metrics.truncatedStreams }),
+    degenerateResponses: t("metricsGroupDegenerateResponses", { n: metrics.degenerateResponses }),
   };
   const extra = groups.length > 0 ? `; ${groups.map((g) => groupLabels[g.kind]).join("; ")}` : "";
   return t("metricsSummary", {
@@ -114,61 +119,12 @@ const DEBUG = process.env.PI_NVIDIA_PLUS_DEBUG === "1";
 const debugLogPath = (): string => agentFile("nvidia-plus-debug.log");
 
 // ── Мёртвые модели встроенного каталога ────────────────────────────────────
-// Аудит живого каталога 2026-08-26 (research/02-nim-catalog-audit.md) + добор
-// 2026-09-18. 410 EOL — надёжный признак; «404 in every probe» — по пробам
-// (404 бывает транзитным), поэтому дата в скобках обязательна.
-//
-// ЗНАЧЕНИЯ ВИДНЫ ПОЛЬЗОВАТЕЛЮ: они подставляются в `{reason}` уведомлений
-// (i18n.ts: deadOnSelect, deadObservedMarked, respDeadNote). Никаких внутренних
-// идентификаторов — номеров рабочих элементов, «audit NN», «ticket NN», «лог
-// XXXXXXXX» — и никаких дневниковых подробностей. test/dead-models.test.ts
-// это проверяет.
-export const DEAD_MODELS: Record<string, string> = {
-  "meta/llama-3.1-70b-instruct": "410 EOL",
-  "meta/llama-3.1-8b-instruct": "410 EOL",
-  "meta/llama-3.3-70b-instruct": "410 EOL",
-  "nvidia/llama-3.1-nemotron-nano-8b-v1": "410 EOL",
-  "nvidia/llama-3.1-nemotron-nano-vl-8b-v1": "410 EOL",
-  "nvidia/llama-3.3-nemotron-super-49b-v1": "410 EOL",
-  "nvidia/llama-3.3-nemotron-super-49b-v1.5": "410 EOL",
-  "nvidia/nemotron-nano-12b-v2-vl": "410 EOL",
-  "nvidia/nvidia-nemotron-nano-9b-v2": "410 EOL",
-  "thinkingmachines/inkling": "410 EOL",
-  "deepseek-ai/deepseek-v4-flash-0731": "end of life after 2026-09-21, announced by NVIDIA (chat probes hung on 2026-09-18)",
-  "deepseek-ai/deepseek-v4-pro-0813": "410 EOL (probed 2026-09-18)",
-  "minimaxai/minimax-m3": "410 EOL (probed 2026-09-18)",
-  "meta/muse-glimmer-30b": "404 on probe 2026-09-18 (answered before that)",
-  // nvidia/nemotron-3.5-lightning-30b-a3b воскресела: 200 на пробах 2026-09-18 — убрана из мёртвых
-  "google/gemma-3-4b-it": "404 in every probe",
-  "google/gemma-3-12b-it": "404 in every probe",
-  "mistralai/mistral-7b-instruct-v0.3": "404 in every probe",
-  "moonshotai/kimi-k2.6": "404 in every probe",
-  "nvidia/cosmos-reason2-8b": "404 in every probe",
-  "nvidia/llama-3.1-nemotron-70b-instruct": "404 in every probe",
-  "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in every probe",
-  // Вне базы пи (аудит 02; нужно для живого обнаружения — не добавлять мёртвых)
-  // Пробы 2026-09-18: наши бывшие оверрайды, померли
-  "nvidia/nemotron-3-nano-30b-a3b": "410 EOL (probed 2026-09-18)",
-  "openai/gpt-oss-120b": "410 EOL (probed 2026-09-18)",
-  "stepfun-ai/step-3.7-flash": "410 EOL (probed 2026-09-18)",
-  "01-ai/yi-large": "404 in every probe (catalog audit 2026-08-26)",
-  "ai21labs/jamba-1.5-large-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "databricks/dbrx-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "deepseek-ai/deepseek-v4-flash": "410 EOL (catalog audit 2026-08-26)",
-  "deepseek-ai/deepseek-v4-pro": "410 EOL (catalog audit 2026-08-26)",
-  "microsoft/phi-3-vision-128k-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "microsoft/phi-3.5-moe-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/codestral-22b-instruct-v0.1": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/mistral-large": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/mistral-large-2-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/mixtral-8x22b-v0.1": "404 in every probe (catalog audit 2026-08-26)",
-  "nvidia/llama-3.1-nemotron-51b-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "nvidia/nemotron-4-340b-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "nvidia/nemotron-mini-4b-instruct": "410 EOL (catalog audit 2026-08-26)",
-  "nvidia/nemotron-nano-3-30b-a3b": "404 in every probe (catalog audit 2026-08-26)",
-  "nvidia/vila": "404 in every probe (catalog audit 2026-08-26)",
-  "writer/palmyra-creative-122b": "404 in every probe (catalog audit 2026-08-26)",
-};
+// Таблица вынесена в `dead-models.ts`: её импортируют и входная точка, и
+// `scripts/discover-models.mjs` — копии уже расходились (в скрипте не было
+// `starcoder` из discovery.ts, исследование 06, §2). Правила датирования,
+// словарь причин и правило «значения видны пользователю» — в шапке того
+// модуля и в test/dead-models.test.ts.
+export { DEAD_MODELS };
 
 function debug(stage: string, label: string, payload: unknown): void {
   if (!DEBUG) return;
@@ -221,6 +177,10 @@ const lastDiagnosticNotify = new Map<string, number>();
 // поэтому уведомление приходит только когда повторы исчерпаны; веер дочерних
 // процессов pi не должен дублировать его.
 const lastTruncatedNotify = new Map<string, number>();
+// Дегенеративный вывод при HTTP 200 (исследование 06, §3): тот же дроссель —
+// раз в минуту на модель. Отказ интермиттирующий и лечится повтором, поэтому
+// уведомление — подсказка, а не диагноз каждого ответа.
+const lastDegenerateNotify = new Map<string, number>();
 let lastNvidiaModelId: string | undefined;
 // Дроссель уведомлений о переключении ключей (тикет 25, pi-subagents).
 let lastSwitchNotifyAt = 0;
@@ -973,16 +933,46 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   // дросселированное уведомление с подсказкой (уровень мышления / выход прокси).
   pi.on("message_end", (event, ctx) => {
     if (ctx.model?.provider !== PROVIDER) return;
-    if (!isTruncatedStreamError(event.message)) return;
-    metrics.truncatedStreams++;
-    const message = event.message as { errorMessage?: string };
-    debug("stream-truncated", `${ctx.model.id}: ${message.errorMessage}`, {});
+    if (isTruncatedStreamError(event.message)) {
+      metrics.truncatedStreams++;
+      const message = event.message as { errorMessage?: string };
+      debug("stream-truncated", `${ctx.model.id}: ${message.errorMessage}`, {});
+      if (!ctx.hasUI) return;
+      const now = Date.now();
+      const last = lastTruncatedNotify.get(ctx.model.id);
+      if (last !== undefined && now - last < 60_000) return;
+      lastTruncatedNotify.set(ctx.model.id, now);
+      ctx.ui.notify(t("streamTruncated", { modelId: ctx.model.id }), "warning");
+      return;
+    }
+    // ── Дегенеративный вывод при HTTP 200 (исследование 06, §3–4) ────────────
+    // Поток не оборван, finish_reason есть, но содержимое — коллапс повторений,
+    // утечка special-токена или пустой ответ при `stop`. Транспорт бессилен
+    // (контент уже у пи), поэтому уровень тот же, что у обрыва: наблюдение,
+    // счётчик в /nvidia-plus status, одно дросселированное уведомление.
+    const source = toDegenerateSource(event.message as never);
+    if (!source) return;
+    const verdict: DegenerateVerdict = classifyDegenerate(source);
+    if (verdict.kind === "ok") return;
+    metrics.degenerateResponses++;
+    debug("degenerate-response", `${ctx.model.id}: ${verdict.kind}`, verdict);
     if (!ctx.hasUI) return;
     const now = Date.now();
-    const last = lastTruncatedNotify.get(ctx.model.id);
+    const last = lastDegenerateNotify.get(ctx.model.id);
     if (last !== undefined && now - last < 60_000) return;
-    lastTruncatedNotify.set(ctx.model.id, now);
-    ctx.ui.notify(t("streamTruncated", { modelId: ctx.model.id }), "warning");
+    lastDegenerateNotify.set(ctx.model.id, now);
+    const modelId = ctx.model.id;
+    if (verdict.kind === "collapse") {
+      const where = t(verdict.where === "text" ? "degenerateWhereText" : "degenerateWhereThinking");
+      ctx.ui.notify(t("degenerateCollapse", { modelId, where }), "warning");
+    } else if (verdict.kind === "token-leak") {
+      ctx.ui.notify(t("degenerateTokenLeak", { modelId, token: verdict.token }), "warning");
+    } else if (verdict.kind === "empty-stop") {
+      ctx.ui.notify(t("degenerateEmptyStop", { modelId }), "warning");
+    } else {
+      // empty-length: честная нехватка бюджета — не брак, а подсказка.
+      ctx.ui.notify(t("degenerateEmptyLength", { modelId }), "info");
+    }
   });
 
   // ── Обработчики подкоманд (тикет 24): регистрация одной командой ниже ──

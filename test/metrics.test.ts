@@ -63,6 +63,20 @@ assert.deepEqual(m.formatParts().groups.map((g) => g.kind), [
 ]);
 assert.equal(m.snapshot().truncatedStreams, 1);
 
+// Счётчик дегенеративных ответов (исследование 06): виден только ненулевым.
+m.degenerateResponses = 3;
+assert.deepEqual(m.formatParts().groups.map((g) => g.kind), [
+  "retries",
+  "inBandRetries",
+  "keySwitches",
+  "deadKeys",
+  "cooldownWaits",
+  "proxySwitches",
+  "truncatedStreams",
+  "degenerateResponses",
+]);
+assert.equal(m.snapshot().degenerateResponses, 3);
+
 // Снимок — копия: мутации снимка не влияют на счётчик.
 const snap = m.snapshot();
 snap.responses.set(500, 99);

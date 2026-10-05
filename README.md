@@ -25,6 +25,7 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
 5. **Diagnostics.** `retry-after` and request IDs for 429/5xx are surfaced during pi's retry pauses.
 6. **Transparent in-band retry.** NIM sometimes answers an overloaded request with **HTTP 200** whose SSE stream carries `data: {"error":{"message":"Service temporarily overloaded"}}`. Both status-keyed layers (transport 429/5xx retry, key rotation) miss it, so it surfaces as a `stopReason: error` turn that pi's own retry layer hands straight to the model. The extension sniffs the first SSE event and transparently re-issues the request (3 retries, 5 s→30 s backoff), so pi and the model never see it. On exhaustion pi gets the original error unchanged. Toggle with `NVIDIA_NIM_TRANSPORT_RETRY`.
 7. **Truncated-stream detection.** NIM can drop an SSE stream mid-generation (typically on long thinking output or a gateway timeout): the stream ends without a `finish_reason` chunk and pi-ai throws `Stream ended without finish_reason`. pi retries this itself, so the extension only acts when retries are exhausted and the truncated message is finalized — it counts such streams in `/nvidia-plus status` and shows one throttled warning per minute with hints (lower thinking level, switch proxy exit, retry).
+8. **Degenerate-output detection.** NIM can also return a *successful* response — HTTP 200, `finish_reason` present, `usage` correct — whose content is garbage: a repetition collapse (`42424242…`, `The!!!!…`), a leaked special token (`<|close|>`), or an empty answer with `finish_reason: stop` (reasoning-channel degeneration). No transport layer can see this, and a transparent retry would duplicate output, so the extension observes finalized messages (`message_end`), counts them in `/nvidia-plus status` and shows one throttled warning per minute per model. The hints distinguish the two empty answers: `stop` means *repeat the request* (raising `max_tokens` does not help), `length` means *the budget was eaten by reasoning* (raise `max_tokens` or lower the thinking level). The detector is a pure offline classifier (zlib compressibility < 0.08, single-character share > 0.75, special-token pattern) calibrated on real collapsed responses and live legitimate corpora (prose 0.41, JSON 0.16, collapses 0.007–0.009) — see [`research/06-gateway-recon-keyless-oracles.md`](research/06-gateway-recon-keyless-oracles.md) §4.
 
 ## Installation
 
@@ -176,10 +177,12 @@ mechanics — is written up in [`research/`](research/); start at
 ## Limitations
 
 - **Dead models warn, they do not disappear.** `DEAD_MODELS`
-  (`extensions/pi-nvidia-plus.ts`) is a point-in-time audit (probes of
-  2026-08-26 and 2026-09-18). NIM retires ids without notice, so the list is
-  always behind reality; selecting a listed id produces a warning naming the
-  probe evidence, and an id that died *after* the audit fails the ordinary way.
+  (`extensions/dead-models.ts`) is a point-in-time audit (keyed probes of
+  2026-08-26 and 2026-09-18; keyless 410 re-probe of 2026-10-05 turned the
+  410 entries into exact end-of-life dates). NIM retires ids without notice, so
+  the list is always behind reality; selecting a listed id produces a warning
+  naming the probe evidence, and an id that died *after* the audit fails the
+  ordinary way.
   Both headline thinking families this extension was built for are on that list
   (DeepSeek V4, MiniMax M3).
 - **Gemma 4 cannot think.** In thinking mode `google/gemma-4*` hangs — no
@@ -212,13 +215,19 @@ npm run typecheck
 npm run check                  # both
 ```
 
-Opt-in scripts — each spends real NIM quota, so none of them run under `check`:
+Opt-in scripts — the acceptance and bench scripts spend real NIM quota, so none
+of them run under `check`:
 
 ```bash
 npm run acceptance:proxy-pool  # drives the proxy ring against real exits
-npm run discover               # live GET /v1/models outside a pi session
+npm run discover               # live GET /v1/models outside a pi session (keyless = no quota)
+node scripts/discover-models.mjs --probe-routes --probe-eol [--direct]
+                               # keyless oracles (research/06 §1): chat-route ground truth
+                               # for every live model and exact EOL dates for DEAD_MODELS.
+                               # No authorization header is sent, so no key quota is spent.
+npm run bench:proxies          # A/B the same probe set across several exits (needs the env below)
 NVIDIA_API_KEY=nvapi-… PROXY_AB_LIST='[{"name":"a","url":"http://host:1080","type":"…","country":"…","asn":"…"}]' \
-  npm run bench:proxies        # A/B the same probe set across several exits
+  npm run bench:proxies
 ```
 
 One acceptance script spends nothing, needs no network, and runs in CI on every
