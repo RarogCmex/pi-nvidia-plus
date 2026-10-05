@@ -124,6 +124,29 @@ for (const [id, entry] of Object.entries(overrides)) {
   );
 }
 
+// ── 3b. kimi-k3: нативный reasoning_effort, валидные варианты NIM ───────────
+// Живая проба 2026-10-05 (research/07): без `supportsReasoningEffort` карта
+// мышления kimi инертна — пи не шлёт ничего, модель рассуждает неограниченно и
+// виснет. NIM принимает только none/minimal/low/medium/high/xhigh/max (`off`→400),
+// поэтому off обязан маппиться в `none`, а не в `off`/`null`/`on`.
+const kimi = overrides["moonshotai/kimi-k3"];
+assert.ok(kimi, "оверрайд moonshotai/kimi-k3 пропал");
+assert.equal(
+  (kimi.compat as Record<string, unknown> | undefined)?.supportsReasoningEffort,
+  true,
+  "kimi-k3 без supportsReasoningEffort:true — карта мышления инертна, пи не шлёт reasoning_effort (research/07 §1)",
+);
+const kimiMap = kimi.thinkingLevelMap as Record<string, unknown>;
+assert.ok(kimiMap, "kimi-k3: нет thinkingLevelMap");
+assert.equal(kimiMap.off, "none", 'kimi-k3: off должен быть "none" — NIM отвергает "off" (400), а null/absent виснет (research/07 §2–3)');
+const NIM_EFFORT_VARIANTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+for (const [level, value] of Object.entries(kimiMap)) {
+  assert.ok(
+    typeof value === "string" && NIM_EFFORT_VARIANTS.has(value),
+    `kimi-k3: уровень ${level} → «${String(value)}» не является валидным вариантом NIM (none…max)`,
+  );
+}
+
 rmSync(dir, { recursive: true, force: true });
 
 // ── 4. Файл остаётся машиночитаемым (без комментариев и хвостовых запятых) ────

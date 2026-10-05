@@ -16,6 +16,7 @@
 | [`05-pi-internals.md`](05-pi-internals.md) | как устроен провайдер `nvidia` внутри pi: слои каталога, авторизация, ретраи | 2026-08-26 | чтение исходников |
 | [`05-reference-plugins.md`](05-reference-plugins.md) | разбор двух существующих NIM-расширений как материал к выбору архитектуры | 2026-08-26 | чтение опубликованных пакетов |
 | [`06-gateway-recon-keyless-oracles.md`](06-gateway-recon-keyless-oracles.md) | что можно узнать о NIM **без ключа** (три исхода keyless-пробы: 404/401/410); ложно-положительный в `NON_CHAT_PATTERNS`; непокрытый класс отказа — деградация вывода при HTTP 200 и рабочий детектор repetition-collapse; приёмы стороннего key-rotation прокси | 2026-10-05 | keyless-пробы `integrate.api.nvidia.com` (80 моделей) + read-only разбор стороннего шлюза |
+| [`07-kimi-k3-thinking-probe.md`](07-kimi-k3-thinking-probe.md) | живая проба kimi-k3 **с ключом**: карта мышления была инертной (`supportsReasoningEffort:false`), валидные варианты `reasoning_effort` у NIM (`none`…`max`, `off`→400), коллапс reasoning-канала воспроизведён напрямую и **не зависит от уровня** — гипотеза 06 §3 «off→null спасёт» опровергнута; боевая проверка детектора `degenerate.ts` | 2026-10-05 | живые `POST /v1/chat/completions` с ключом pi (14 запросов) + чтение `dist/` pi-ai |
 | [`goal.md`](goal.md) | **исторический** план работ: приоритеты P0…P5, открытые вопросы, критерии приёмки | 2026-08 | — |
 
 ## Как это читать

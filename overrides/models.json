@@ -75,14 +75,15 @@
         },
         "moonshotai/kimi-k3": {
           "reasoning": true,
+          "compat": { "supportsReasoningEffort": true },
           "thinkingLevelMap": {
-            "off": "off",
-            "minimal": "low",
+            "off": "none",
+            "minimal": "minimal",
             "low": "low",
-            "medium": "on",
-            "high": "on",
-            "xhigh": "on",
-            "max": "on"
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
           }
         },
         "z-ai/glm-5.3": {

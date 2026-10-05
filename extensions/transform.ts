@@ -51,6 +51,17 @@ const GEMMA4 = /^google\/gemma-4/;
 const DEEPSEEK_V4 = /^deepseek-ai\/deepseek-v4/;
 const GLM = /^z-ai\/glm/;
 
+// Намеренно НЕ обрабатываются здесь (нативный путь пи, а не хук):
+//  - `openai/gpt-oss-20b` и `moonshotai/kimi-k3` принимают стандартный top-level
+//    `reasoning_effort`, поэтому управляются метаданными в `overrides/models.json`
+//    (`compat.supportsReasoningEffort: true` + `thinkingLevelMap`), а не кодом.
+//    Для kimi это единственно рабочий путь: его встроенная карта была инертной
+//    (`supportsReasoningEffort:false`, без `thinkingFormat`), пи не слал ничего,
+//    и модель рассуждала неограниченно (живые пробы 2026-10-05 — исследование 07).
+//    NIM принимает только `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`
+//    (`off`→HTTP 400), поэтому `off` маппится в `none`. Не добавляйте kimi-хендлер
+//    сюда и не «чините» его карту в `off`/`on` — это вернуло бы 400.
+
 function minimaxThinkingMode(level: string): string {
   if (level === "off") return "disabled";
   if (level === "high" || level === "xhigh" || level === "max") return "enabled";

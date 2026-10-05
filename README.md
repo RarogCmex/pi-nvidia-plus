@@ -80,7 +80,7 @@ makes pi's `--thinking <level>` selector reachable for them at all:
 | `nvidia/nemotron-3-ultra-550b-a55b` | same |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | same |
 | `nvidia/nemotron-3.5-lightning-30b-a3b` | same |
-| `moonshotai/kimi-k3` | same |
+| `moonshotai/kimi-k3` | native `reasoning_effort` (`supportsReasoningEffort: true`): `off`→none · `minimal`/`low`/`medium`/`high`/`xhigh`/`max`→identity. NIM accepts only `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — `off` is a 400, and omitting the field (the built-in default) leaves kimi reasoning unbounded, so `off` must send `none` (unlike `gpt-oss-20b`, where omitting is safe). Probed live 2026-10-05. |
 | `z-ai/glm-5.3`, `z-ai/glm-5.3-flash` | same |
 | `openai/gpt-oss-20b` | native `reasoning_effort`: `off`→omitted · `minimal`→low · `xhigh`/`max`→high |
 | `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
@@ -194,6 +194,17 @@ mechanics — is written up in [`research/`](research/); start at
 - **GLM mappings are unverified hypotheses.** `z-ai/glm*` injection is
   extrapolated from the family, not probed id by id. If an upstream rejects
   `chat_template_kwargs`, the request 400s.
+- **kimi-k3 is flaky on NIM and slow.** Live probes of 2026-10-05
+  ([`research/07`](research/07-kimi-k3-thinking-probe.md)) show `moonshotai/kimi-k3`
+  takes ~2–4 min even for a one-word answer and, on a trivial prompt, returns a
+  repetition collapse (`content: null`, `reasoning_content: "The!!!…"`,
+  `finish_reason: stop`) in roughly half of completed runs — **independent of the
+  reasoning level** (`none`, `low` and the built-in default all collapse). This is
+  a model-side fault, not a mapping artifact: the extension sends the valid NIM
+  variant (`off`→`none`; `off`→`"off"` was an HTTP 400 and the built-in map was
+  inert), and the degenerate-output detector (§8 above) catches each collapse and
+  tells you to repeat the request. No `reasoning_effort` value makes kimi-k3
+  reliable; if it collapses, retry.
 - **Billing is out of scope.** The extension does not read, estimate or report
   NIM cost; pi's own cost accounting for the `nvidia` provider is untouched.
 - **Overrides are per-id, not per-family.** An id absent from
