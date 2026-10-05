@@ -66,6 +66,9 @@ import {
     "nvidia/ising-calibration-1.5-31b",
     "google/deplot",
     "nvidia/nvclip",
+    // completion-only семейство: chat-роута нет вообще, keyless-проба даёт
+    // `404 page not found` — исследование 06, §1–2, проба 2026-10-05
+    "bigcode/starcoder2-15b",
   ];
   for (const id of nonChat) assert.equal(isChatModel(id), false, `должен быть отсеян: ${id}`);
 
@@ -82,6 +85,15 @@ import {
     "nvidia/vila",
     "adept/fuyu-8b",
     "poolside/laguna-xs-2.1",
+    // кодовые модели, у которых chat-роут ЕСТЬ (keyless-проба 401 — исследование 06,
+    // §2): guards against слишком широкого паттерна, который отсек бы их вместе со starcoder
+    "meta/codellama-70b",
+    "google/codegemma-7b",
+    "google/codegemma-1.1-7b",
+    "mistralai/codestral-22b-instruct-v0.1",
+    "ibm/granite-8b-code-instruct",
+    "ibm/granite-34b-code-instruct",
+    "deepseek-ai/deepseek-coder-6.7b-instruct",
   ];
   for (const id of chat) assert.equal(isChatModel(id), true, `должен остаться: ${id}`);
 }

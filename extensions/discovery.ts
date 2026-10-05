@@ -47,8 +47,14 @@ export function parseModelsResponse(payload: unknown): LiveModel[] {
 /**
  * Признаки не-чат моделей: эмбеддинги, ретрайверы/реранкеры, reward-модели,
  * защитные классификаторы (guard/безопасность), перевод, парсинг, детекторы,
- * калибровка, утилиты зрения (deplot), генерация изображений/речь.
+ * калибровка, утилиты зрения (deplot), генерация изображений/речь, а также
+ * completion-only семейства (starcoder).
  * Список консервативный: отсеивается только явно не-чат.
+ *
+ * Лексика здесь — эвристика, а не свидетельство: наличие chat-роута проверяется
+ * пробой без ключа (`404 page not found` против `401`) — исследование 06, §1.
+ * Оракул строже по факту роута и мягче по смыслу: guard/reward/translate роут
+ * имеют, но как чат-ассистенты бесполезны, поэтому остаются отфильтрованными.
  */
 const NON_CHAT_PATTERNS: RegExp[] = [
   /embed/i,
@@ -66,6 +72,13 @@ const NON_CHAT_PATTERNS: RegExp[] = [
   /clip/i,
   /\b(tts|asr|whisper|speech)\b/i,
   /(stable-?diffusion|sdxl|\bflux\b|dall-?e|imagen|image-?gen)/i,
+  // starcoder — семейство FIM/completion, chat-роута у него нет вообще:
+  // проба без ключа даёт `404 page not found` (text/plain) на
+  // POST /v1/chat/completions — исследование 06, §1–2, проба 2026-10-05.
+  // Паттерн намеренно узкий: остальные кодовые модели каталога chat-роут имеют
+  // (codellama, codegemma, codestral, granite-*-code, deepseek-coder — все 401),
+  // поэтому «всё кодовое» сломало бы семь живых моделей.
+  /starcoder/i,
 ];
 
 export function isChatModel(id: string): boolean {
