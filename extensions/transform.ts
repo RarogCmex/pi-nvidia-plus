@@ -111,6 +111,64 @@ export function thinkingPlanCaveat(modelId: string): "planCaveatGemma4Hangs" | u
   return undefined;
 }
 
+/**
+ * Метаданные модели, нужные, чтобы предсказать нативный `reasoning_effort` пи
+ * (путь `supportsReasoningEffort` в pi-ai `openai-completions`). Берутся из
+ * объекта модели в точке входа — то есть из уже применённых оверрайдов, а не из
+ * захардкоженной копии (иначе карта в коде и в `overrides/models.json` разошлись
+ * бы — ровно тот дрейф, от которого лечит единый источник).
+ */
+export interface NativeEffortMeta {
+  supportsReasoningEffort?: boolean;
+  thinkingLevelMap?: Record<string, string | null>;
+}
+
+/**
+ * Какое top-level `reasoning_effort` пи сам (без нашего хука) положит в запрос
+ * для модели с `compat.supportsReasoningEffort` на данном уровне. Зеркалит две
+ * ветки pi-ai `openai-completions`:
+ *  - уровень `off` → пи шлёт `thinkingLevelMap.off`, если это строка; `null`/нет
+ *    → поле НЕ уходит (`undefined`);
+ *  - прочий уровень → `thinkingLevelMap[level] ?? level` (pi: `?? level`, поэтому
+ *    отсутствующее/`null`-значение даёт имя уровня).
+ *
+ * Только для нативного пути; семейства, которые ведёт `transform.ts`, описывает
+ * `thinkingPlan`. Возвращает `undefined`, когда `supportsReasoningEffort` выключен
+ * (модель не на нативном пути — вызывающий код решает, что показывать).
+ */
+export function nativeReasoningEffort(level: string, meta: NativeEffortMeta): string | undefined {
+  if (!meta.supportsReasoningEffort) return undefined;
+  const map = meta.thinkingLevelMap ?? {};
+  if (level === "off") {
+    const off = map.off;
+    return typeof off === "string" ? off : undefined; // null/нет → поле не уходит
+  }
+  const mapped = map[level];
+  return typeof mapped === "string" ? mapped : level; // null/нет → имя уровня (pi: ?? level)
+}
+
+/**
+ * План «что реально уходит в NIM» для статус-строки и `/nvidia-plus status`
+ * (пункт 6 исследования 06, §5.4): пара «запрошенный уровень → wire-значение».
+ * Сначала семейства хука (`thinkingPlan`), затем нативный путь пи
+ * (`nativeReasoningEffort`) — так kimi-k3/gpt-oss-20b показывают настоящий
+ * `reasoning_effort`, а не «нет инжекта». Возвращает machine-строку (wire-параметр,
+ * не переводится — как остальные планы); `undefined` — нечего показать.
+ */
+export function wireThinkingPlan(
+  modelId: string,
+  level: string,
+  meta: { reasoning?: boolean } & NativeEffortMeta,
+): string | undefined {
+  const hooked = thinkingPlan(modelId, level);
+  if (hooked) return hooked;
+  if (meta.reasoning && meta.supportsReasoningEffort) {
+    const effort = nativeReasoningEffort(level, meta);
+    return effort === undefined ? "reasoning_effort omitted" : `reasoning_effort="${effort}"`;
+  }
+  return undefined;
+}
+
 function ensureChatTemplateKwargs(payload: Payload): Payload {
   let kwargs = payload.chat_template_kwargs as Payload | undefined;
   if (!kwargs || typeof kwargs !== "object") {

@@ -6,7 +6,7 @@
  * (подтверждена живыми пробами) и пользовательская история №19.
  */
 import assert from "node:assert/strict";
-import { transformRequest, thinkingPlan, thinkingPlanCaveat, type Payload } from "../extensions/transform.ts";
+import { transformRequest, thinkingPlan, thinkingPlanCaveat, nativeReasoningEffort, wireThinkingPlan, type Payload } from "../extensions/transform.ts";
 
 const M3 = "minimaxai/minimax-m3";
 const N3 = "nvidia/nemotron-3-super-120b-a12b";
@@ -204,5 +204,43 @@ assert.equal(thinkingPlan(GEMMA4, "high"), "chat_template_kwargs.enable_thinking
 assert.equal(thinkingPlanCaveat(GEMMA4), "planCaveatGemma4Hangs", "для gemma-4 нужна оговорка");
 assert.equal(thinkingPlanCaveat(N3), undefined, "у nemotron оговорки нет");
 assert.equal(thinkingPlanCaveat(OTHER), undefined, "у чужого семейства оговорки нет");
+
+// 13. Нативный путь пи (пункт 6 исследования 06, §5.4): что реально уходит в NIM
+// для моделей с supportsReasoningEffort, которые НЕ ведёт хук (kimi-k3, gpt-oss-20b).
+// Значения — из применённых оверрайдов, проверяем зеркало логики pi-ai.
+const KIMI_MAP = { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
+const GPTOSS_MAP = { off: null, minimal: "low", xhigh: "high", max: "high" } as Record<string, string | null>;
+// kimi: off → "none" (не "off", который NIM отвергает 400), прочие идентично.
+assert.equal(nativeReasoningEffort("off", { supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }), "none");
+assert.equal(nativeReasoningEffort("low", { supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }), "low");
+assert.equal(nativeReasoningEffort("max", { supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }), "max");
+// gpt-oss: off → null = поле не уходит.
+assert.equal(nativeReasoningEffort("off", { supportsReasoningEffort: true, thinkingLevelMap: GPTOSS_MAP }), undefined);
+assert.equal(nativeReasoningEffort("minimal", { supportsReasoningEffort: true, thinkingLevelMap: GPTOSS_MAP }), "low");
+// Отсутствующее/`null`-значение на не-off уровне → имя уровня (pi: `?? level`).
+assert.equal(nativeReasoningEffort("medium", { supportsReasoningEffort: true, thinkingLevelMap: GPTOSS_MAP }), "medium");
+// Без supportsReasoningEffort — не нативный путь, функция не используется.
+assert.equal(nativeReasoningEffort("off", { supportsReasoningEffort: false, thinkingLevelMap: KIMI_MAP }), undefined);
+
+// wireThinkingPlan: хук имеет приоритет, нативный путь — запасной, нечитаемое — undefined.
+assert.equal(
+  wireThinkingPlan(OTHER, "off", { reasoning: true, supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }),
+  'reasoning_effort="none"',
+  "kimi off должен показывать реальный reasoning_effort=none, а не «нет инжекта»",
+);
+assert.equal(
+  wireThinkingPlan("openai/gpt-oss-20b", "off", { reasoning: true, supportsReasoningEffort: true, thinkingLevelMap: GPTOSS_MAP }),
+  "reasoning_effort omitted",
+  "gpt-oss off → поле не уходит",
+);
+// Семейство хука (nemotron) — приоритет у thinkingPlan, даже если передан supportsReasoningEffort.
+assert.equal(
+  wireThinkingPlan(N3, "off", { reasoning: true, supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }),
+  "chat_template_kwargs.enable_thinking=false",
+  "хук важнее нативного пути",
+);
+// Не reasoning и не семейство хука — показывать нечего.
+assert.equal(wireThinkingPlan(OTHER, "high", { reasoning: false }), undefined);
+assert.equal(wireThinkingPlan(OTHER, "high", {}), undefined);
 
 console.log("transform: все проверки прошли");

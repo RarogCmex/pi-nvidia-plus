@@ -98,9 +98,15 @@ wire parameters if its id matches a family prefix:
 | `minimaxai/minimax-m3` | `thinking_mode: disabled \| adaptive \| enabled` | id returns 410 |
 | `google/gemma-4*` | `enable_thinking=false` at **every** level | live probes — see Limitations |
 
-`/nvidia-plus status` prints the exact injection for the currently selected
-model and level. `/nvidia-plus discover` adds live ids that pi's catalog is
-missing (it never adds an id the dead-model list already knows about).
+`/nvidia-plus status` (and the live status line) print the exact thinking
+parameter that reaches NIM for the selected model and level. For hook-driven
+families that is the injected `chat_template_kwargs`/`reasoning_effort`; for
+native-path models (`moonshotai/kimi-k3`, `openai/gpt-oss-20b`) it is the
+`reasoning_effort` pi derives from the applied `thinkingLevelMap` (e.g. kimi
+`off` → `reasoning_effort="none"`), so you can verify the requested level against
+what actually goes upstream without `PI_NVIDIA_PLUS_DEBUG=1`. `/nvidia-plus
+discover` adds live ids that pi's catalog is missing (it never adds an id the
+dead-model list already knows about).
 
 ## Usage
 

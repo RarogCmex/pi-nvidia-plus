@@ -48,7 +48,7 @@ import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { agentFile, applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscovered, modelsJsonPath, stateFilePath } from "./store.ts";
-import { transformRequest, thinkingPlan, thinkingPlanCaveat, type Payload } from "./transform.ts";
+import { transformRequest, wireThinkingPlan, thinkingPlanCaveat, type Payload } from "./transform.ts";
 import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
 import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
 import {
@@ -731,12 +731,33 @@ function initProxyFromEnv(): void {
   // nvidia-модели (тикеты 16/18): здесь, на загрузке, UI-нотификатора ещё нет.
 }
 
+/**
+ * Пара «запрошенный уровень → реально ушедший в NIM» (пункт 6 исследования 06,
+ * §5.4): статус-строка и `/nvidia-plus status` показывают wire-значение не только
+ * для семейств хука, но и для нативного пути пи (kimi-k3, gpt-oss-20b —
+ * `reasoning_effort` из применённого `thinkingLevelMap`). Метаданные берутся из
+ * объекта модели, а не из копии карты — единственный источник остаётся в оверрайдах.
+ */
+function wirePlanFor(model: ExtensionContext["model"], level: string | undefined): string | undefined {
+  if (!model || typeof level !== "string") return undefined;
+  const m = model as {
+    reasoning?: boolean;
+    thinkingLevelMap?: Record<string, string | null>;
+    compat?: { supportsReasoningEffort?: boolean } | null;
+  };
+  return wireThinkingPlan(model.id, level, {
+    reasoning: m.reasoning,
+    supportsReasoningEffort: m.compat?.supportsReasoningEffort,
+    thinkingLevelMap: m.thinkingLevelMap,
+  });
+}
+
 /** Строка статус-бара; `undefined` очищает ключ для не-`nvidia` моделей. */
 function statusLine(ctx: ExtensionContext): string | undefined {
   const model = ctx.model;
   if (!model || model.provider !== PROVIDER) return undefined;
   const level = ctx.thinkingLevel;
-  const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
+  const plan = wirePlanFor(model, level);
   const caveatKey = thinkingPlanCaveat(model.id);
   const caveat = caveatKey ? t(caveatKey) : "";
   return `nv+ ${model.id} · thinking ${level ?? "?"}${plan ? ` → ${plan}${caveat}` : t("statusNoInjection")}`;
@@ -1092,7 +1113,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         return;
       }
       const level = ctx.thinkingLevel;
-      const plan = typeof level === "string" ? thinkingPlan(model.id, level) : undefined;
+      const plan = wirePlanFor(model, level);
       const caveatKey = thinkingPlanCaveat(model.id);
       ctx.ui.notify(
         `pi-nvidia-plus (${auto}; ${proxy}${retryState ? `; ${retryState}` : ""}; ${rotationState}; ${metricsState}): ${t("statusThinking", {
