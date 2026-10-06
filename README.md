@@ -286,12 +286,18 @@ so npm, nvm, pnpm and user-prefix installs all work; on Windows it creates
 junctions. To point at a specific install:
 `PI_ROOT=/path/to/node_modules node scripts/link-pi.mjs`.
 
-Verified against pi 0.87.1 / Node 26, re-verified on pi 0.99.1 (2026-09-30) and on
-pi 1.0.0 (2026-10-03): same bundled undici 8.10.2 and `@types/node` 22.19.19,
-Node 26.10 — typecheck plus all 21 test files green on both. Loading on 1.0.0 was
-checked in an isolated `PI_CODING_AGENT_DIR`: `models.json` and
-`nvidia-plus-models.json` appear there and `--list-models nvidia` still prints the
-19 built-in models (this extension is hook-only, so the list is not the signal).
+Verified against pi 0.87.1 / Node 26, re-verified on pi 0.99.1 (2026-09-30), on
+pi 1.0.0 (2026-10-03: same bundled undici 8.10.2 and `@types/node` 22.19.19) and on
+pi 1.0.4 (2026-10-06): bundled undici is still 8.10.2, but `@types/node` moved to
+**26.6.4**, whose `assert.ok` no longer accepts `string | undefined` as the message
+(overload 1 takes `Error`/function, overload 2 a required `string`) — one test line
+needed `?? ""` to typecheck again (0.3.1). With that, typecheck (tsc 5.9.3 and
+7.1.0-dev) plus all 21 test files are green, Node 26.10. Loading on 1.0.0 and 1.0.4
+was checked in an isolated `PI_CODING_AGENT_DIR`: `models.json` (10 overrides) and
+`nvidia-plus-models.json` appear there and `--list-models nvidia` prints exactly the
+built-in catalog with and without the extension (19=19 on 1.0.0; 21=21 on 1.0.4 —
+pi's own nvidia catalog grew between those hosts; this extension is hook-only, so
+the list is not the signal).
 
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
 devDependency (`link-pi.mjs` links pi's packages and undici), so TypeScript must
