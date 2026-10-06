@@ -804,7 +804,9 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
     throw new Error("secret://u:p@h взрыв");
   });
   assert.equal(run2.rows[0].outcome, "unknown");
-  assert.ok(!(run2.rows[0].error ?? "").includes("u:p"), run2.rows[0].error);
+  // Сообщение — строго string: в @types/node 26 (бандл pi 1.0.4) assert.ok больше
+  // не принимает `string | undefined` (перегруз 1 — Error|функция, 2 — string).
+  assert.ok(!(run2.rows[0].error ?? "").includes("u:p"), run2.rows[0].error ?? "");
 
   // Аборт: оставшиеся пробы пропускаются, сводка по уже полученным.
   let probedCount = 0;
