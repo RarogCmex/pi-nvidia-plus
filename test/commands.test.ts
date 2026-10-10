@@ -112,15 +112,17 @@ function values(prefix: string): string[] | null {
   const names = nvidiaPlusCommands().map((c) => c.name);
   assert.deepEqual(names, ["apply", "rollback", "status", "keys", "proxy", "discover"]);
   const keys = completeArgs("keys ", nvidiaPlusCommands());
-  assert.deepEqual(keys?.map((i) => i.value), ["keys check", "keys on", "keys off"]);
+  assert.deepEqual(keys?.map((i) => i.value), ["keys check", "keys auth-check", "keys cleanup-dead", "keys on", "keys off"]);
   assert.equal(keys?.[0].label, "check");
   assert.equal(keys?.[0].description, "probe each pool key against the selected nvidia model");
+  assert.equal(keys?.[1].description, "probe every pool key with the zero-generation auth oracle (research 09)");
+  assert.equal(keys?.[2].description, "remove keys the auth oracle proved dead (timestamped backup is kept)");
   const apply = completeArgs("apply ", nvidiaPlusCommands());
   assert.deepEqual(apply?.map((i) => i.value), ["apply force"]);
   assert.equal(apply?.[0].label, "force");
   assert.equal(apply?.[0].description, "overwrite conflicting models.json entries");
   const root = completeArgs("", nvidiaPlusCommands());
-  assert.equal(root?.find((i) => i.value === "keys ")?.label, "keys [check|on|off]");
+  assert.equal(root?.find((i) => i.value === "keys ")?.label, "keys [check|auth-check|cleanup-dead|on|off]");
   assert.equal(root?.find((i) => i.value === "apply ")?.label, "apply [force]");
   const proxy = completeArgs("proxy ", nvidiaPlusCommands());
   assert.deepEqual(proxy?.map((i) => i.value), ["proxy check", "proxy pin ", "proxy on", "proxy off"]);
@@ -173,7 +175,7 @@ function values(prefix: string): string[] | null {
     "apply [force]",
     "rollback",
     "status",
-    "keys [check|on|off]",
+    "keys [check|auth-check|cleanup-dead|on|off]",
     "proxy [check|pin|on|off]",
     "discover",
   ]);
@@ -184,7 +186,7 @@ function values(prefix: string): string[] | null {
 
   const keys = nvidiaPlusArgSuggestions("/nvidia-plus keys ");
   assert.equal(keys?.prefix, "keys ");
-  assert.deepEqual(keys?.items.map((i) => i.value), ["keys check", "keys on", "keys off"]);
+  assert.deepEqual(keys?.items.map((i) => i.value), ["keys check", "keys auth-check", "keys cleanup-dead", "keys on", "keys off"]);
 
   const partial = nvidiaPlusArgSuggestions("/nvidia-plus k");
   assert.equal(partial?.prefix, "k");
@@ -192,7 +194,7 @@ function values(prefix: string): string[] | null {
 
   const keysExact = nvidiaPlusArgSuggestions("/nvidia-plus keys");
   assert.equal(keysExact?.prefix, "keys");
-  assert.deepEqual(keysExact?.items.map((i) => i.value), ["keys check", "keys on", "keys off"]);
+  assert.deepEqual(keysExact?.items.map((i) => i.value), ["keys check", "keys auth-check", "keys cleanup-dead", "keys on", "keys off"]);
 
   // proxy: второй уровень — `pin ` с хвостовым пробелом (контракт value),
   // третий уровень — id текущего пула через редакторный перехват.

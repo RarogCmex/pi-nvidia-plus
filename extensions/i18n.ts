@@ -63,6 +63,14 @@ export const MESSAGES = {
     en: "enable key rotation in this session",
     ru: "включить ротацию ключей в этой сессии",
   },
+  cmdKeysAuthCheckDesc: {
+    en: "probe every pool key with the zero-generation auth oracle (research 09)",
+    ru: "проверить все ключи пула оракулом авторизации без генерации (исследование 09)",
+  },
+  cmdKeysCleanupDeadDesc: {
+    en: "remove keys the auth oracle proved dead (timestamped backup is kept)",
+    ru: "удалить ключи, доказанно мёртвые оракулом авторизации (резерв с датой сохраняется)",
+  },
   cmdKeysOffDesc: {
     en: "disable key rotation in this session",
     ru: "выключить ротацию ключей в этой сессии",
@@ -109,6 +117,38 @@ export const MESSAGES = {
   keysCheckFailed: {
     en: "pi-nvidia-plus: key check failed — {error}",
     ru: "pi-nvidia-plus: проверка ключей не удалась — {error}",
+  },
+  keysAuthStart: {
+    en: "pi-nvidia-plus: auth-checking {count} keys with zero generation (probe model {modelId}, a dead verdict is re-probed once)…",
+    ru: "pi-nvidia-plus: проверяю {count} ключей без генерации (модель пробы {modelId}, вердикт «мёртв» подтверждается повтором)…",
+  },
+  keysAuthNoModel: {
+    en: "pi-nvidia-plus: the live NIM catalog gave no chat model to probe with — refusing to guess (a wrong probe model makes every key look alive)",
+    ru: "pi-nvidia-plus: в живом каталоге NIM не нашлось чат-модели для пробы — наугад не проверяю (неверная модель пробы делает все ключи «живыми»)",
+  },
+  keysAuthSummary: {
+    en: "pi-nvidia-plus: keys auth-check in {seconds} s — alive: {alive}, dead: {dead}, unclear: {unknown}{deadList}",
+    ru: "pi-nvidia-plus: auth-check ключей за {seconds} с — живые: {alive}, мёртвые: {dead}, не определены: {unknown}{deadList}",
+  },
+  keysCleanupNoFile: {
+    en: "pi-nvidia-plus: keys cleanup needs the keys FILE source; current source: {source}",
+    ru: "pi-nvidia-plus: чистке ключей нужен файл-источник; текущий источник: {source}",
+  },
+  keysCleanupRefusedTooMany: {
+    en: "pi-nvidia-plus: refusing cleanup — {dead} of {probed} keys look dead; the oracle is more likely broken than the pool, file untouched",
+    ru: "pi-nvidia-plus: отказ чистки — мёртвыми выглядят {dead} из {probed}; вероятнее сломался оракул, чем пул, файл не тронут",
+  },
+  keysCleanupRefusedEmpty: {
+    en: "pi-nvidia-plus: refusing cleanup — it would empty the key pool entirely",
+    ru: "pi-nvidia-plus: отказ чистки — она опустошила бы пул ключей целиком",
+  },
+  keysCleanupNoneDead: {
+    en: "pi-nvidia-plus: no dead keys — nothing to remove",
+    ru: "pi-nvidia-plus: мёртвых ключей нет — удалять нечего",
+  },
+  keysCleanupApplied: {
+    en: "pi-nvidia-plus: removed {removed} dead keys, {kept} kept; backup: {backup}",
+    ru: "pi-nvidia-plus: удалено {removed} мёртвых ключей, осталось {kept}; резерв: {backup}",
   },
   rotationSwitchMore: {
     en: " (and {count} more switches in the last 5 s)",

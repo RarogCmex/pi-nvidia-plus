@@ -62,7 +62,10 @@ a separate, read-only file you maintain yourself.
 `NVIDIA_NIM_KEYS` / `NVIDIA_NIM_KEYS_FILE` (default `~/.pi/agent/nvidia-keys.json`)
 add extra `nvapi-…` keys that the extension rotates to when the active key hits a
 429 bucket or a 401/403. Your pi credential is always first in the ring. The
-extension only reads the file. See [Configuration](#configuration).
+extension only reads the file — the one deliberate exception is
+`/nvidia-plus keys cleanup-dead`, which rewrites it after a confirmed zero-
+generation sweep removed only proven-dead keys (timestamped backup next to
+the file, mode 0600). See [Configuration](#configuration).
 
 ## Models
 
@@ -120,6 +123,8 @@ All commands live under one root to keep the command menu clean:
 | `/nvidia-plus discover` | Live `GET /v1/models` discovery: add new chat models, flag missing known ones |
 | `/nvidia-plus keys` | Key-pool status |
 | `/nvidia-plus keys check` | Probe each pool key against the selected nvidia model |
+| `/nvidia-plus keys auth-check` | Validate every pool key with **zero generation** (research 09): auth runs before the model-function lookup, so 403 = dead, 404-for-account = alive. A `dead` verdict is re-probed before it counts |
+| `/nvidia-plus keys cleanup-dead` | Remove the keys `auth-check` proved dead from the keys file (timestamped backup, mode 0600, `$VAR` entries untouched; refuses if more than half looks dead — that means the oracle broke, not the pool) |
 | `/nvidia-plus keys on\|off` | Toggle key rotation for the live session |
 | `/nvidia-plus proxy` | Proxy-pool settings panel: source, pin, ring state, each endpoint's state + last latency |
 | `/nvidia-plus proxy check` | Probe every exit (`GET /v1/models` through each) and pin the fastest reachable |
@@ -246,6 +251,8 @@ npm run proxies:add -- --candidates /tmp/list.json --egress --write
 npm run proxies:audit -- --providers nvidia,openrouter,groq --rounds 2
                                # matrix "exit × provider": which exits serve which APIs
 npm run proxies:prune -- --drop host:port[,host:port…] --write
+npm run keys:auth-check        # zero-generation validity sweep of the keys pool
+npm run keys:cleanup-dead       # remove the dead keys (backup, 0600, guards)
 npm run proxies:normalize -- --write
                                # canonical form + host:port dedupe of the pool file
 npm run discover               # live GET /v1/models outside a pi session (keyless = no quota)
@@ -290,6 +297,13 @@ request with a non-JSON body (Together 401 text/plain, DeepSeek 401 with no
 content-type, Cohere 403 text/html); those are marked `expectation: "any"` and
 pinned by status instead, which is weaker against a proxy's own interstitial and
 documented as such in the table.
+
+`keys:auth-check` / `keys:cleanup-dead` (`scripts/keys-audit.mjs`) are the CLI
+twins of the same oracle: no generation, no key quota, decisions from the pure
+seam in `extensions/key-check.ts` (`classifyKeyAuthProbe`, `planKeyCleanup`),
+probe model taken from the live keyless catalog on every run — a hardcoded
+model id would rot and start 404-ing before auth, silently turning every key
+alive (research/09).
 
 One acceptance script spends nothing, needs no network, and runs in CI on every
 push — so it is safe to run by hand:

@@ -43,14 +43,14 @@
  * Наблюдаемость: прокси-интро и префлайт — только при выбранной модели `nvidia`
  * (на старте сессии или при выборе); на не-`nvidia` сессиях расширение себя не проявляет.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { agentFile, applyFiles, loadState, loadDiscoveryReport, rollbackFiles, writeDiscovered, modelsJsonPath, stateFilePath } from "./store.ts";
 import { transformRequest, wireThinkingPlan, thinkingPlanCaveat, type Payload } from "./transform.ts";
-import { parseModelsResponse, classifyDiscovery } from "./discovery.ts";
-import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME } from "./keys.ts";
+import { parseModelsResponse, classifyDiscovery, isChatModel } from "./discovery.ts";
+import { KeyPool, KeyRotator, maskKey, DEFAULT_KEYS_FILE_NAME, interpolateEnvValue, parseKeysFileContent } from "./keys.ts";
 import {
   DEFAULT_PROXIES_FILE_NAME,
   PROXY_CHECK_CONCURRENCY,
@@ -63,7 +63,15 @@ import {
   type ProxyProbeAttempt,
   type ProxyProbeEndpoint,
 } from "./proxy-pool.ts";
-import { classifyKeyProbeStatus, keyCheckUnknownSample, type KeyCheckOutcome } from "./key-check.ts";
+import {
+  classifyKeyAuthProbe,
+  classifyKeyProbeStatus,
+  keyCheckUnknownSample,
+  planKeyCleanup,
+  type KeyAuthOutcome,
+  type KeyCheckOutcome,
+  type KeyCleanupEntry,
+} from "./key-check.ts";
 import { isTruncatedStreamError } from "./stream-errors.ts";
 import { classifyDegenerate, toDegenerateSource, type DegenerateVerdict } from "./degenerate.ts";
 import { DEAD_MODELS } from "./dead-models.ts";
@@ -371,6 +379,79 @@ async function checkKeyPool(modelId: string, keysToCheck: string[]): Promise<Map
     while (cursor < keysToCheck.length) {
       const key = keysToCheck[cursor++];
       results.set(key, await probeKeyOnce(undici, dispatcher, modelId, key));
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return results;
+}
+
+// ── Auth-оракул без генерации (исследование 09): `keys auth-check` ──────────
+// До генерации запрос не доходит: тело без `messages`, а авторизация в NIM
+// идёт раньше резолва chat-функции под аккаунт. Модель пробы обязана быть из
+// ЖИВОГО каталога — несуществующий id резолвится ДО авторизации (исследование
+// 06) и делает все ключи «живыми», поэтому её не угадываем, а берём с сервера.
+type KeyAuthProbe = { outcome: KeyAuthOutcome; status?: number; error?: string };
+
+async function probeKeyAuthOnce(
+  undici: any,
+  dispatcher: unknown,
+  modelId: string,
+  key: string,
+): Promise<KeyAuthProbe> {
+  try {
+    const res = await undici.request("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
+      dispatcher,
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: modelId }),
+      headersTimeout: 20_000,
+      bodyTimeout: 20_000,
+    });
+    // Тело читаем для освобождения сокета, но не логируем: в 404-ответе
+    // NIM называет id аккаунта.
+    await res.body.text();
+    const outcome = classifyKeyAuthProbe(res.statusCode);
+    if (outcome === "unknown") debug("keys-auth", `ключ ${maskKey(key)} — статус ${res.statusCode}`, {});
+    return { outcome, status: res.statusCode };
+  } catch (e) {
+    const error = String(e).slice(0, 120);
+    debug("keys-auth", `ключ ${maskKey(key)} — ${error}`, {});
+    return { outcome: "unknown", error };
+  }
+}
+
+/** Модель для пробы оракула: первая чат-модель живого keyless-каталога. */
+async function pickAuthProbeModel(): Promise<string | undefined> {
+  ensureTransportInstalled();
+  try {
+    const res = await fetch("https://integrate.api.nvidia.com/v1/models", { signal: AbortSignal.timeout(20_000) });
+    const live = parseModelsResponse(await res.json());
+    return live.map((m) => m.id).find((id) => isChatModel(id));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Прогон оракула по пулу. `dead` подтверждается второй пробой — ключи это
+ * деньги, ложное удаление дороже повтора; `alive`/`unknown` дальше не дублируем.
+ */
+async function authCheckKeyPool(modelId: string, keysToCheck: string[]): Promise<Map<string, KeyAuthProbe>> {
+  ensureTransportInstalled();
+  const { undici, error } = resolvePiUndici();
+  if (!undici) throw new Error(error ?? "undici недоступен");
+  const dispatcher = getNvidiaDirectDispatcher();
+  const results = new Map<string, KeyAuthProbe>();
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < keysToCheck.length) {
+      const key = keysToCheck[cursor++];
+      let probe = await probeKeyAuthOnce(undici, dispatcher, modelId, key);
+      if (probe.outcome === "dead") {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        probe = await probeKeyAuthOnce(undici, dispatcher, modelId, key);
+      }
+      results.set(key, probe);
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
@@ -1178,6 +1259,92 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             }),
             groups.dead.length > 0 || (groups.unknown.length > 0 && groups.ok.length === 0) ? "warning" : "info",
           );
+        } catch (e) {
+          ctx.ui.notify(t("keysCheckFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+        }
+        return;
+      }
+      if (arg === "auth-check" || arg === "cleanup-dead") {
+        // Исследование 09: ключ проверяется БЕЗ генерации — авторизация в NIM
+        // идёт раньше резолва chat-функции. `cleanup-dead` дополнительно вычищает
+        // мёртвые из пул-файла (резерв рядом, права 0600); инлайн-источник
+        // окружения не трогает — его нечем переписать.
+        const cleanup = arg === "cleanup-dead";
+        const poolKeys = keyPool.refresh();
+        if (poolKeys.length === 0) {
+          ctx.ui.notify(t("keysPoolNotSet", { file: agentFile(DEFAULT_KEYS_FILE_NAME) }), "info");
+          return;
+        }
+        if (cleanup && !keyPool.fileSource()) {
+          ctx.ui.notify(t("keysCleanupNoFile", { source: keyPool.describe() }), "error");
+          return;
+        }
+        const modelId = await pickAuthProbeModel();
+        if (!modelId) {
+          ctx.ui.notify(t("keysAuthNoModel"), "error");
+          return;
+        }
+        ctx.ui.notify(t("keysAuthStart", { count: poolKeys.length, modelId }), "info");
+        const startedAt = Date.now();
+        try {
+          const results = await authCheckKeyPool(modelId, poolKeys);
+          const groups: Record<KeyAuthOutcome, string[]> = { alive: [], dead: [], unknown: [] };
+          for (const [key, probe] of results) groups[probe.outcome].push(key);
+          // Мёртвые сразу помечаем в ротаторе — сессия их больше не трогает.
+          for (const key of groups.dead) keyRotator.markDead(key);
+          const seconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+          const deadList = groups.dead.length > 0 ? t("keysCheckDeadList", { ids: groups.dead.map(maskKey).join(", ") }) : "";
+          if (!cleanup) {
+            ctx.ui.notify(
+              t("keysAuthSummary", {
+                seconds,
+                alive: groups.alive.length,
+                dead: groups.dead.length,
+                unknown: groups.unknown.length,
+                deadList,
+              }),
+              groups.dead.length > 0 ? "warning" : "info",
+            );
+            return;
+          }
+          // cleanup-dead: перечитываем файл, чтобы удалить ИСХОДНЫЕ записи
+          // (сохраняя порядок), а не резолвы из ротации.
+          const file = keyPool.fileSource();
+          if (!file) {
+            ctx.ui.notify(t("keysCleanupNoFile", { source: keyPool.describe() }), "error");
+            return;
+          }
+          const parsed = parseKeysFileContent(readFileSync(file, "utf8"));
+          if (!parsed.keys) {
+            ctx.ui.notify(t("keysCheckFailed", { error: parsed.error ?? "?" }), "error");
+            return;
+          }
+          const outcomeByResolved = new Map<string, KeyAuthOutcome>();
+          for (const [key, probe] of results) outcomeByResolved.set(key, probe.outcome);
+          const entries: KeyCleanupEntry[] = parsed.keys.map((rawEntry) => {
+            const resolved = rawEntry.startsWith("nvapi-") ? rawEntry : interpolateEnvValue(rawEntry, process.env);
+            return { raw: rawEntry, probeKey: resolved, outcome: resolved ? outcomeByResolved.get(resolved) : undefined };
+          });
+          const plan = planKeyCleanup(entries);
+          // Гварды проверяем ДО записи: отказ — файл не трогаем.
+          if (plan.refusal === "too-many-dead") {
+            ctx.ui.notify(t("keysCleanupRefusedTooMany", { dead: plan.droppedCount, probed: plan.probedCount }), "error");
+            return;
+          }
+          if (plan.refusal === "empty-result") {
+            ctx.ui.notify(t("keysCleanupRefusedEmpty"), "error");
+            return;
+          }
+          if (plan.droppedCount === 0) {
+            ctx.ui.notify(t("keysCleanupNoneDead"), "info");
+            return;
+          }
+          const backup = `${file}.bak-${Date.now()}`;
+          copyFileSync(file, backup);
+          chmodSync(backup, 0o600);
+          writeFileSync(file, `${JSON.stringify({ keys: plan.keep }, null, 2)}\n`, { mode: 0o600 });
+          chmodSync(file, 0o600);
+          ctx.ui.notify(t("keysCleanupApplied", { removed: plan.droppedCount, kept: plan.keep.length, backup }), "info");
         } catch (e) {
           ctx.ui.notify(t("keysCheckFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
         }

@@ -83,6 +83,8 @@ export function nvidiaPlusCommands(): CommandSpec[] {
       description: t("cmdKeysDesc"),
       args: [
         arg("check", "cmdKeysCheckDesc"),
+        arg("auth-check", "cmdKeysAuthCheckDesc"),
+        arg("cleanup-dead", "cmdKeysCleanupDeadDesc"),
         arg("on", "cmdKeysOnDesc"),
         arg("off", "cmdKeysOffDesc"),
       ],

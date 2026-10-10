@@ -41,7 +41,9 @@
     "proxies:providers": "node scripts/proxy-pool-audit.mjs providers",
     "proxies:add": "node scripts/proxy-pool-audit.mjs add",
     "proxies:prune": "node scripts/proxy-pool-audit.mjs prune",
-    "proxies:normalize": "node scripts/proxy-pool-audit.mjs normalize"
+    "proxies:normalize": "node scripts/proxy-pool-audit.mjs normalize",
+    "keys:auth-check": "node scripts/keys-audit.mjs",
+    "keys:cleanup-dead": "node scripts/keys-audit.mjs --write"
   },
   "pi": {
     "extensions": [

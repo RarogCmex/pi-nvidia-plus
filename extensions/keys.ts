@@ -182,6 +182,16 @@ export class KeyPool {
     return this.opts.defaultPath.endsWith(DEFAULT_KEYS_FILE_NAME) ? DEFAULT_KEYS_FILE_NAME : this.opts.defaultPath;
   }
 
+  /**
+   * Путь к файлу-источнику, когда пул живёт в файле (инлайн-источник — undefined).
+   * Нужен чистке мёртвых ключей (`keys cleanup-dead`): она переписывает именно
+   * файл, а не инлайн-переменную окружения, которую трогать нечем.
+   */
+  fileSource(): string | undefined {
+    if (this.inline().length > 0) return undefined;
+    return this.filePath();
+  }
+
   /** Актуальный пул: инлайн перечитывается всегда, файл — при смене `mtime`. */
   refresh(): string[] {
     const inline = this.inline();
