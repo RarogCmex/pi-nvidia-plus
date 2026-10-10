@@ -166,6 +166,8 @@ Exactly one source wins — `NVIDIA_NIM_PROXIES` > `NVIDIA_NIM_PROXIES_FILE` > t
 
 Per request to NIM the ring picks one **pin** — a sticky exit for the whole inner key/retry circle. A dead CONNECT (including SOCKS handshake/auth failures) goes to a 60 s **quarantine** (TTL, not a permanent denylist); 429/401/403/5xx and in-band overload never rotate the proxy (those are key/transport buckets). `/nvidia-plus proxy check` measures latency on a cheap `GET /v1/models` through each exit and pins the fastest reachable one. In notifications, status, logs and the shared state file every exit appears only as its display identity `host:port` — credentials are never written.
 
+**`host:port` must be unique in the pool.** Display identity is what pinning, the shared quarantine file and the status panel key on, so two entries that differ only by credentials are the *same* exit as far as the ring is concerned: `hrefForDisplay` resolves to the first match and a display-keyed cooldown lands on both. Rotating gateways sold as several identities behind one host (for example two different accounts on `p.webshare.io:80`) therefore cannot coexist — `npm run proxies:add` reports such a candidate as a display conflict and skips it unless you pass `--replace-display` to swap the credentials of the existing entry.
+
 **SOCKS5** is served by undici's native `Socks5ProxyAgent`, which needs **undici ≥ 8.9** — the copy pi bundles decides whether it is available (pi 0.87.1 bundles undici 8.10.2). It is experimental: Node prints one `ExperimentalWarning` per process. `socks5h://` is normalized to `socks5://`: the native client always hands the hostname to the proxy (remote DNS), so the `h` distinction is degenerate for NIM. `socks4://` and other schemes are rejected with a parse error. On an older pi whose undici lacks `Socks5ProxyAgent`, a socks entry gets a clear error and is quarantined — the rest of the pool keeps working.
 
 ## How it works
@@ -237,6 +239,15 @@ of them run under `check`:
 
 ```bash
 npm run acceptance:proxy-pool  # drives the proxy ring against real exits
+npm run proxies:audit          # strict health sweep of the pool file (keyless, no quota)
+npm run proxies:providers      # re-measure the provider probe table itself (direct or --via host:port)
+npm run proxies:add -- --candidates /tmp/list.json --egress --write
+                               # intake new exits: 3 probes in a row, all must pass
+npm run proxies:audit -- --providers nvidia,openrouter,groq --rounds 2
+                               # matrix "exit × provider": which exits serve which APIs
+npm run proxies:prune -- --drop host:port[,host:port…] --write
+npm run proxies:normalize -- --write
+                               # canonical form + host:port dedupe of the pool file
 npm run discover               # live GET /v1/models outside a pi session (keyless = no quota)
 node scripts/discover-models.mjs --probe-routes --probe-eol [--direct]
                                # keyless oracles (research/06 §1): chat-route ground truth
@@ -246,6 +257,39 @@ npm run bench:proxies          # A/B the same probe set across several exits (ne
 NVIDIA_API_KEY=nvapi-… PROXY_AB_LIST='[{"name":"a","url":"http://host:1080","type":"…","country":"…","asn":"…"}]' \
   npm run bench:proxies
 ```
+
+`proxies:*` (`scripts/proxy-pool-audit.mjs`) spend **no key quota** — the probe
+is a keyless `GET /v1/models`, the same one `/nvidia-plus proxy check` uses —
+but they do need network, so they stay out of `check`. The intake decisions live
+in a pure seam, `extensions/proxy-intake.ts`, covered offline by
+`test/proxy-intake.test.ts`; the script only does I/O. Acceptance gate: every
+exit must answer **all** `--rounds` probes (3 by default) within `--timeout`
+(20 s — the budget the real request path gives), and is rejected as slow only
+when **all** rounds exceed `--slow-ms` (12 s), since NIM itself can be sticky.
+There are deliberately no retries inside a round: a retry hides a hang, and one
+lucky answer out of three is not stability. The probe latency says nothing about
+chat latency — `GET /v1/models` involves neither prefill nor generate, where NIM
+can take 30 s and 15–30 s more. Reports land in the gitignored `test-results/`
+and contain only `host:port` masks, never credentials; the pool file is written
+with mode 0600 and a timestamped `.bak-*` copy next to it.
+
+The same tool probes **other providers**, not only NIM: `--providers` takes any
+of the 16 keyless catalog endpoints in its table (OpenAI, Anthropic, OpenRouter,
+Google, Groq, DeepInfra, Together, Mistral, DeepSeek, xAI, Cerebras, SambaNova,
+Cohere, Fireworks, Hugging Face), `--target URL` adds a custom one, and
+`--require <id>` names the provider whose verdict decides (default: the first
+requested). Everything else is reported as a note, so a provider that is
+geo-blocked behind an exit does not disqualify an exit that serves NIM fine.
+Each table entry carries the statuses it answers with (`okStatuses`) — a 401/403
+means "the service answered, the tunnel is alive", while a 404 means the probe
+URL itself went stale and is reported as `mismatch`, not as a bad exit.
+`npm run proxies:providers` re-measures the whole table on demand, which is how
+the stale `fireworks` URL was caught (`/v1/models` → 404 JSON "Path not found";
+the working path is `/inference/v1/models`). Three providers answer a keyless
+request with a non-JSON body (Together 401 text/plain, DeepSeek 401 with no
+content-type, Cohere 403 text/html); those are marked `expectation: "any"` and
+pinned by status instead, which is weaker against a proxy's own interstitial and
+documented as such in the table.
 
 One acceptance script spends nothing, needs no network, and runs in CI on every
 push — so it is safe to run by hand:

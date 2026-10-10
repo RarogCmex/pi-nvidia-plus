@@ -17,6 +17,14 @@
 - `extensions/transform.ts` — чистый шов: трансформация пейлоада
   (thinking по семействам, нормализация контента, дефолтный `max_tokens`).
   Без pi и без сети.
+- `extensions/proxy-intake.ts` — чистый шов приёмки выходов: нормализация
+  формы `host:port:user:pass`, канон записи пула, строгий вердикт по серии
+  проб (`hang`/`slow`/`hijack`/`mismatch`), сведение вердиктов нескольких
+  провайдеров, план слияния и вычёркивания. Без pi и без сети, покрыт
+  `test/proxy-intake.test.ts`; сеть и файлы — на стороне
+  `scripts/proxy-pool-audit.mjs`. Таблица keyless-целей провайдеров
+  (`PROBE_TARGETS`) живёт в скрипте: он её единственный потребитель, а
+  проверяется она на месте командой `providers`.
 - `extensions/proxy.ts`, `extensions/proxy-pool.ts` — выборочный глобальный
   диспетчер (только `integrate.api.nvidia.com`), кольцо выходов, карантин,
   пиннинг, SOCKS5.
@@ -35,6 +43,10 @@
 - `extensions/discovery.ts`, `extensions/commands.ts` — живое
   `GET /v1/models` и таблица дополнений команд.
 - `test/` — офлайн-тесты; `scripts/run-tests.mjs` — кроссплатформенный раннер.
+- `scripts/proxy-pool-audit.mjs` — ревизия пула выходов: `audit` (строгая
+  серия проб), `add --candidates FILE` (приёмка новых), `prune --drop`,
+  `normalize`. Решения берёт из `extensions/proxy-intake.ts`, сеть — из
+  undici самого pi, вывод только `host:port`.
 - `research/` — датированные разборы (поверхность pi/pi-ai, аудит живого
   каталога NIM, маппинги thinking, механика прокси). Это источник фактов
   для каталога и хуков.
@@ -48,6 +60,17 @@ npm run check              # typecheck + офлайн-тесты — обяза�
 
 `npm run acceptance:proxy-pool` — приёмочный прогон прокси-кольца; требует
 настоящих выходов и потому в `check` не входит.
+
+`npm run proxies:audit` / `proxies:add` / `proxies:prune` / `proxies:normalize` /
+`proxies:providers` (`scripts/proxy-pool-audit.mjs`) — ревизия пула выходов:
+тоже требуют сеть и потому в `check` не входят, но ключ НЕ отправляют (keyless
+`GET /v1/models` и аналоги у других провайдеров), поэтому квоту не тратят.
+Гейт приёмки: `--rounds 3` последовательных проб, все в `--timeout 20000`
+(бюджет реального пути запросов), брак по задержке только если все раунды
+медленнее `--slow-ms 12000`. Ретраев внутри раунда нет намеренно: они
+маскируют тормоз. `--providers nvidia,openrouter,…` даёт матрицу «выход ×
+провайдер», решает вердикт цели из `--require` (по умолчанию NIM): остальные —
+справка, чтобы гео-блок одного провайдера не выбраковал рабочий выход.
 
 ## Правила
 

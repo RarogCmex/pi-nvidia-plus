@@ -36,7 +36,12 @@
     "acceptance:proxy-pool": "node scripts/proxy-pool-acceptance.mjs",
     "acceptance:agent-dir": "node scripts/agent-dir-acceptance.mjs",
     "discover": "node scripts/discover-models.mjs",
-    "bench:proxies": "node scripts/test-proxies.mjs"
+    "bench:proxies": "node scripts/test-proxies.mjs",
+    "proxies:audit": "node scripts/proxy-pool-audit.mjs audit",
+    "proxies:providers": "node scripts/proxy-pool-audit.mjs providers",
+    "proxies:add": "node scripts/proxy-pool-audit.mjs add",
+    "proxies:prune": "node scripts/proxy-pool-audit.mjs prune",
+    "proxies:normalize": "node scripts/proxy-pool-audit.mjs normalize"
   },
   "pi": {
     "extensions": [
