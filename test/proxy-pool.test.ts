@@ -19,7 +19,12 @@ import {
   DEFAULT_PROXIES_FILE_NAME,
   PROXY_CHECK_CONCURRENCY,
   PROXY_QUARANTINE_MS,
+  PROXY_REQUEST_BODY_TIMEOUT_MS,
+  PROXY_REQUEST_HEADERS_TIMEOUT_MS,
+  PROXY_ROUTE_AVOID_MS,
   PROXY_PROBE_TIMEOUT_MS,
+  PROXY_TIMEOUT_MAX_MS,
+  PROXY_TIMEOUT_MIN_MS,
   ProxyPool,
   ProxyRotator,
   classifyProxyProbe,
@@ -28,6 +33,7 @@ import {
   parseInlineProxies,
   parseProxiesFileContent,
   parseProxyEndpoint,
+  parseRequestTimeouts,
   redactProxyCredentials,
   runProxyProbes,
   type ProxyProbeResultRow,
@@ -822,6 +828,84 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
   const run4 = await runProxyProbes(endpoints.slice(0, 2), async () => ({ error: new Error("x") }));
   assert.equal(fastestOk(run4.rows), undefined);
   assert.equal(run4.rows.every((r: ProxyProbeResultRow) => r.outcome === "unknown"), true);
+}
+
+/* ── parseRequestTimeouts: дефолты, env-ручки, пол/потолок, предупреждения ── */
+{
+  // Дефолт без env.
+  const d = parseRequestTimeouts({});
+  assert.equal(d.headersTimeoutMs, PROXY_REQUEST_HEADERS_TIMEOUT_MS);
+  assert.equal(d.bodyTimeoutMs, PROXY_REQUEST_BODY_TIMEOUT_MS);
+  assert.equal(d.warnings.length, 0);
+
+  // Валидные значения проходят дословно.
+  const ok = parseRequestTimeouts({ NVIDIA_NIM_HEADERS_TIMEOUT_MS: "90000", NVIDIA_NIM_BODY_TIMEOUT_MS: "240000" });
+  assert.equal(ok.headersTimeoutMs, 90_000);
+  assert.equal(ok.bodyTimeoutMs, 240_000);
+  assert.equal(ok.warnings.length, 0);
+
+  // Не целое — дефолт + предупреждение с именем переменной.
+  const bad = parseRequestTimeouts({ NVIDIA_NIM_HEADERS_TIMEOUT_MS: "двадцать" });
+  assert.equal(bad.headersTimeoutMs, PROXY_REQUEST_HEADERS_TIMEOUT_MS);
+  assert.equal(bad.warnings.length, 1);
+  assert.equal(bad.warnings[0].name, "NVIDIA_NIM_HEADERS_TIMEOUT_MS");
+  assert.equal(bad.warnings[0].reason, "not-integer");
+
+  // Вне [min, max] — кламп + предупреждение.
+  const clamped = parseRequestTimeouts({ NVIDIA_NIM_BODY_TIMEOUT_MS: "1000" });
+  assert.equal(clamped.bodyTimeoutMs, PROXY_TIMEOUT_MIN_MS);
+  assert.equal(clamped.warnings[0].reason, "out-of-range");
+  const clampedHi = parseRequestTimeouts({ NVIDIA_NIM_BODY_TIMEOUT_MS: String(PROXY_TIMEOUT_MAX_MS + 1) });
+  assert.equal(clampedHi.bodyTimeoutMs, PROXY_TIMEOUT_MAX_MS);
+
+  // Пробелы и пустая строка — дефолт без предупреждения.
+  const blank = parseRequestTimeouts({ NVIDIA_NIM_HEADERS_TIMEOUT_MS: "  ", NVIDIA_NIM_BODY_TIMEOUT_MS: "" });
+  assert.equal(blank.headersTimeoutMs, PROXY_REQUEST_HEADERS_TIMEOUT_MS);
+  assert.equal(blank.bodyTimeoutMs, PROXY_REQUEST_BODY_TIMEOUT_MS);
+  assert.equal(blank.warnings.length, 0);
+}
+
+/* ── Ротатор: модельно-скоупленный обход маршрута после таймаута ───────── */
+{
+  const r = new ProxyRotator({ random: () => 0, quarantineMs: PROXY_QUARANTINE_MS });
+  r.setPool(["http://a:1/", "http://b:2/", "http://c:3/"]);
+
+  // До таймаутов пик не фильтруется.
+  assert.equal(r.pick(0, { rotationEnabled: true, modelId: "m" }).kind, "proxy");
+  assert.equal((r.pick(0, { rotationEnabled: true, modelId: "m" }) as { href: string }).href, "http://a:1/");
+
+  // Таймаут на «m × a»: пик для m уходит с a, избегание скоуплено только m.
+  const left = r.noteRequestTimeout("m", "http://a:1/", 0);
+  assert.equal(left, PROXY_ROUTE_AVOID_MS);
+  assert.equal(r.pick(1_000, { rotationEnabled: true, modelId: "m" }).kind, "proxy");
+  assert.equal((r.pick(1_000, { rotationEnabled: true, modelId: "m" }) as { href: string }).href, "http://b:2/", "m обходит a");
+  assert.equal(r.routeAvoidLeft("m2", "http://a:1/", 1_000), 0, "избегание скоуплено моделью — чужой модели a не запрещён");
+
+  // Обход — подсказка, не блок: когда неавоидируемых готовых нет, пик обычный.
+  r.markConnectFailed("http://b:2/", 1_000);
+  r.markConnectFailed("http://c:3/", 1_000);
+  assert.equal((r.pick(2_000, { rotationEnabled: true, modelId: "m" }) as { href: string }).href, "http://a:1/", "все остальные в cooldown — a используется");
+
+  // TTL истёк — маршрут снова в строю.
+  assert.equal((r.pick(PROXY_ROUTE_AVOID_MS + 2_000, { rotationEnabled: true, modelId: "m" }) as { href: string }).href, "http://a:1/");
+
+  // Успех на маршруте снимает обход раньше TTL.
+  r.noteRequestTimeout("m", "http://a:1/", 10_000);
+  assert.equal(r.routeAvoidLeft("m", "http://a:1/", 11_000), PROXY_ROUTE_AVOID_MS - 1_000);
+  r.clearRequestTimeout("m", "http://a:1/");
+  assert.equal(r.routeAvoidLeft("m", "http://a:1/", 12_000), 0);
+
+  // Выбывший из пула href теряет и обходы (ключ содержит старый href).
+  r.noteRequestTimeout("m", "http://a:1/", 20_000);
+  r.setPool(["http://b:2/"]);
+  r.setPool(["http://a:1/", "http://b:2/"]);
+  assert.equal(r.routeAvoidLeft("m", "http://a:1/", 21_000), 0, "обход выбывшего схлопнулся вместе с href");
+
+  // Один выход в пуле: обход не должен оставить пик без кандидата.
+  const solo = new ProxyRotator({ random: () => 0 });
+  solo.setPool(["http://solo:9/"]);
+  solo.noteRequestTimeout("m", "http://solo:9/", 0);
+  assert.equal((solo.pick(1, { rotationEnabled: true, modelId: "m" }) as { href: string }).href, "http://solo:9/");
 }
 
 console.log("proxy-pool: все проверки прошли");

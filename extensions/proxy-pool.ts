@@ -39,6 +39,99 @@ export const PROXY_PROBE_TIMEOUT_MS = 10_000;
 export const PROXY_CHECK_CONCURRENCY = 2;
 
 /* ------------------------------------------------------------------ */
+/* Таймауты живого пути запроса (исследование 10, §3)                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Дефолтные таймауты запроса через выход пула. Дефолты ундичи — 300 с на
+ * оба; живой замер 2026-10-12 показал, что «зависший» маршрут NIM (модель ×
+ * выход) молчит до самого дефолта, а рабочий путь отвечает заголовками за
+ * секунды — даже самый медленный рабочий выход укладывался в 38 с полным
+ * ответом. 60 с до заголовков — запас ×3 от худшего рабочего случая.
+ * Оба значения — env-ручки (см. `parseRequestTimeouts`).
+ */
+export const PROXY_REQUEST_HEADERS_TIMEOUT_MS = 60_000;
+export const PROXY_REQUEST_BODY_TIMEOUT_MS = 120_000;
+/** Границы env-ручек: ниже пола таймаут лишь мешает, выше капа — снова дефолт-эпоха. */
+export const PROXY_TIMEOUT_MIN_MS = 5_000;
+export const PROXY_TIMEOUT_MAX_MS = 600_000;
+
+/** TTL модельно-скоупленного обхода выхода после таймаута запроса. */
+export const PROXY_ROUTE_AVOID_MS = 60_000;
+
+export interface RequestTimeouts {
+  headersTimeoutMs: number;
+  bodyTimeoutMs: number;
+}
+
+/** Причина, по которой env-ручка не принята дословно. */
+export type RequestTimeoutWarning =
+  | { name: string; value: string; usedMs: number; reason: "not-integer" }
+  | { name: string; value: string; usedMs: number; reason: "out-of-range" };
+
+/**
+ * Разбор `NVIDIA_NIM_HEADERS_TIMEOUT_MS` / `NVIDIA_NIM_BODY_TIMEOUT_MS`:
+ * целые миллисекунды, поле/потолок, битое значение — дефолт + предупреждение
+ * (одно на поле). Чистая функция: предупреждения (без текста — текст
+ * собирает входная точка через i18n) возвращает вызывающему.
+ */
+export function parseRequestTimeouts(
+  env: Record<string, string | undefined>,
+  defaults: RequestTimeouts = {
+    headersTimeoutMs: PROXY_REQUEST_HEADERS_TIMEOUT_MS,
+    bodyTimeoutMs: PROXY_REQUEST_BODY_TIMEOUT_MS,
+  },
+): RequestTimeouts & { warnings: RequestTimeoutWarning[] } {
+  const warnings: RequestTimeoutWarning[] = [];
+  const read = (name: string, fallback: number): number => {
+    const raw = env[name]?.trim();
+    if (!raw) return fallback;
+    if (!/^\d+$/.test(raw)) {
+      warnings.push({ name, value: raw, usedMs: fallback, reason: "not-integer" });
+      return fallback;
+    }
+    const value = Number.parseInt(raw, 10);
+    const clamped = Math.min(Math.max(value, PROXY_TIMEOUT_MIN_MS), PROXY_TIMEOUT_MAX_MS);
+    if (clamped !== value) warnings.push({ name, value: raw, usedMs: clamped, reason: "out-of-range" });
+    return clamped;
+  };
+  return {
+    headersTimeoutMs: read("NVIDIA_NIM_HEADERS_TIMEOUT_MS", defaults.headersTimeoutMs),
+    bodyTimeoutMs: read("NVIDIA_NIM_BODY_TIMEOUT_MS", defaults.bodyTimeoutMs),
+    warnings,
+  };
+}
+
+/**
+ * Таймаут запроса на живом пути (не CONNECT!): заголовки или тело ответа не
+ * пришли вовремя. Коды ундичи (нативные пулы http/https-выходов) + собственные
+ * коды watchdog-слоя `PI_NVIDIA_PLUS_*_TIMEOUT` (см. syntheticTimeoutError в
+ * proxy.ts: коды ундичи намеренно не переиспользуются, чтобы OpenAI SDK
+ * внутри пи не подменял сообщение своей заготовкой
+ * «…configure… headersTimeout…») + текстовые формы (fetch и request()
+ * формулируют одну и ту же ошибку по-разному). Так же, как
+ * `isConnectClassError`, — разворачивает `cause`/AggregateError.
+ */
+const REQUEST_TIMEOUT_MESSAGE_RE = /headers?\s+timeout|body\s+timeout|request\s+timeout/i;
+
+export function isRequestTimeoutError(err: unknown, depth = 0): boolean {
+  if (!err || typeof err !== "object" || depth > 4) return false;
+  const record = err as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+  if (
+    record.code === "UND_ERR_HEADERS_TIMEOUT" ||
+    record.code === "UND_ERR_BODY_TIMEOUT" ||
+    record.code === "PI_NVIDIA_PLUS_HEADERS_TIMEOUT" ||
+    record.code === "PI_NVIDIA_PLUS_BODY_TIMEOUT"
+  ) {
+    return true;
+  }
+  if (typeof record.message === "string" && REQUEST_TIMEOUT_MESSAGE_RE.test(record.message)) return true;
+  if (record.cause && isRequestTimeoutError(record.cause, depth + 1)) return true;
+  if (Array.isArray(record.errors) && record.errors.some((e) => isRequestTimeoutError(e, depth + 1))) return true;
+  return false;
+}
+
+/* ------------------------------------------------------------------ */
 /* Маскировка и разбор эндпоинта                                       */
 /* ------------------------------------------------------------------ */
 
@@ -511,6 +604,8 @@ export class ProxyRotator {
   private cooldownUntil = new Map<string, number>();
   private lastLatency = new Map<string, number>();
   private inFlight = new Map<string, number>();
+  /** Обход маршрута «модель × выход» после таймаута запроса: ключ `model\u0000href`. */
+  private routeAvoidUntil = new Map<string, number>();
   private pinned: string | undefined;
   private sharedPath: string | undefined;
   private sharedStamp = "";
@@ -554,6 +649,9 @@ export class ProxyRotator {
     }
     for (const href of [...this.inFlight.keys()]) {
       if (!poolSet.has(href)) this.inFlight.delete(href);
+    }
+    for (const key of [...this.routeAvoidUntil.keys()]) {
+      if (!poolSet.has(key.split("\u0000")[1])) this.routeAvoidUntil.delete(key);
     }
     this.reconcileSharedWithPool();
   }
@@ -652,7 +750,7 @@ export class ProxyRotator {
    *  5. пул пуст → direct (флаг opt-in fallback проверяет вызывающий —
    *     rotator про пул знает только то, что он пуст).
    */
-  pick(now: number, options: { rotationEnabled: boolean }): ProxyPick {
+  pick(now: number, options: { rotationEnabled: boolean; modelId?: string }): ProxyPick {
     this.mergeShared(now);
     if (this.pool.length === 0) return { kind: "direct" };
     if (!options.rotationEnabled) {
@@ -661,7 +759,17 @@ export class ProxyRotator {
       return { kind: "proxy", href: locked };
     }
     const pinned = this.pinnedHref();
-    const ready = this.ring.filter((h) => this.cooldownLeft(h, now) === 0);
+    let ready = this.ring.filter((h) => this.cooldownLeft(h, now) === 0);
+    // Обход зависшего маршрута (исследование 10, §3): таймаут запроса на
+    // «модели × выходе» — не приговор выходу (другие модели через него могут
+    // работать), поэтому избегаем пары, а не выхода. Обход — подсказка, не
+    // блок: когда неавоидируемых готовых нет (или выход один), пик идёт по
+    // обычным правилам — карантин для всех моделей не справедлив.
+    const modelId = options.modelId;
+    if (modelId !== undefined && ready.length > 1) {
+      const un = ready.filter((h) => this.routeAvoidLeft(modelId, h, now) === 0);
+      if (un.length > 0) ready = un;
+    }
     if (ready.length > 0) {
       // Шаги 2–3 спеки одной строкой (как в `RotationRequest.pick` для ключей):
       // среди ready — наименее занятый, pin выигрывает ничью. Так липкий выход
@@ -693,6 +801,31 @@ export class ProxyRotator {
     if (!this.pool.includes(href)) return;
     this.cooldownUntil.set(href, now + this.quarantineMs);
     this.persistShared(now);
+  }
+
+  /** Остаток обхода маршрута «модель × выход» в мс (0 — не избегается). */
+  routeAvoidLeft(modelId: string, href: string, now: number): number {
+    return Math.max(0, (this.routeAvoidUntil.get(`${modelId}\u0000${href}`) ?? 0) - now);
+  }
+
+  /**
+   * Таймаут запроса на маршруте «модель × выход» (исследование 10, §3):
+   * запоминаем пару на TTL — следующий пик для этой модели возьмёт соседний
+   * выход, если он готов. Карантин выхода НЕ ставим: зависание зависит от
+   * модели (замер: один и тот же выход в одну минуту виснет на одной модели
+   * и отвечает на другой). Возвращает остаток обхода (для уведомления).
+   */
+  noteRequestTimeout(modelId: string, href: string, now: number = Date.now()): number {
+    if (!this.pool.includes(href) || !modelId) return 0;
+    const until = now + PROXY_ROUTE_AVOID_MS;
+    this.routeAvoidUntil.set(`${modelId}\u0000${href}`, until);
+    return until - now;
+  }
+
+  /** Успех на маршруте «модель × выход» снимает его обход: заголовки дошли — маршрут жив. */
+  clearRequestTimeout(modelId: string, href: string): void {
+    if (!modelId) return;
+    this.routeAvoidUntil.delete(`${modelId}\u0000${href}`);
   }
 
   /**

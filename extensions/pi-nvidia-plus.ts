@@ -58,6 +58,7 @@ import {
   ProxyPool,
   ProxyRotator,
   maskProxy,
+  parseRequestTimeouts,
   redactProxyCredentials,
   runProxyProbes,
   type ProxyProbeAttempt,
@@ -90,6 +91,7 @@ import {
   getNvidiaDirectDispatcher,
   getProxyEndpointAgent,
   type NimDiagnostic,
+  type RequestTimeoutConfig,
 } from "./proxy.ts";
 
 const PROVIDER = "nvidia";
@@ -112,6 +114,7 @@ function metricsSummary(): string {
     deadKeys: t("metricsGroupDeadKeys", { n: metrics.deadKeys }),
     cooldownWaits: t("metricsGroupCooldownWaits", { n: metrics.cooldownWaits }),
     proxySwitches: t("metricsGroupProxySwitches", { n: metrics.proxySwitches }),
+    routeTimeouts: t("metricsGroupRouteTimeouts", { n: metrics.routeTimeouts }),
     truncatedStreams: t("metricsGroupTruncatedStreams", { n: metrics.truncatedStreams }),
     degenerateResponses: t("metricsGroupDegenerateResponses", { n: metrics.degenerateResponses }),
   };
@@ -173,6 +176,8 @@ let proxyErrorNotified = false;
 // Карантин CONNECT: одно уведомление на display identity за сессию — веер
 // пи-сабагентов не должен заваливать пользователя одинаковыми ошибками.
 const notifiedQuarantines = new Set<string>();
+/** Таймауты маршрута «модель × выход»: одно уведомление на пару за сессию. */
+const notifiedRouteTimeouts = new Set<string>();
 let proxyEmptyPoolNotified = false;
 // Критерий приёмки №2 (ошибка запроса): наблюдатель диспетчера видит 404/410,
 // которые минуют `after_provider_response`. Уведомляем один раз на модель+статус.
@@ -553,6 +558,19 @@ function ensureTransportInstalled(): void {
         log: (stage: string, label: string, payload: unknown) => debug(stage, label, payload),
       }
     : undefined;
+  // Таймауты живого пути (исследование 10, §3): надзор — самый внутренний слой
+  // каждого лука; предупреждения о битых env-ручках — одно на поле.
+  const parsedTimeouts = parseRequestTimeouts(process.env);
+  for (const warning of parsedTimeouts.warnings) {
+    proxyState.notify?.(
+      t("proxyTimeoutEnvInvalid", { name: warning.name, value: warning.value, ms: warning.usedMs }),
+      "warning",
+    );
+  }
+  const requestTimeouts: RequestTimeoutConfig = {
+    headersTimeoutMs: parsedTimeouts.headersTimeoutMs,
+    bodyTimeoutMs: parsedTimeouts.bodyTimeoutMs,
+  };
   // Кольцо прокси: pick один на dispatch, весь внутренний круг ключей и
   // повторов — на том же выходе (pin-инвариант). Все per-href луки разделяют
   // ОДИН key-ротатор (`rotation` выше инжектится в каждый через stackInner).
@@ -574,6 +592,29 @@ function ensureTransportInstalled(): void {
           if (notifiedQuarantines.has(info.display)) return;
           notifiedQuarantines.add(info.display);
           proxyState.notify?.(`pi-nvidia-plus: ${info.message}`, "error");
+        },
+        // Таймаут запроса на «модели × выходе» (исследование 10, §3): маршрут
+        // обходится TTL, выход НЕ карантинится — зависание зависит от модели
+        // (замер: один и тот же выход в одну минуту виснет на одной модели и
+        // отвечает на другой). Одно уведомление на пару за сессию.
+        onRouteTimeout: (info: { display: string; modelId: string; cooldownLeftMs: number }) => {
+          metrics.routeTimeouts++;
+          debug(
+            "proxy-route-timeout",
+            `${info.display} — таймаут запроса, модель ${info.modelId} обходит маршрут ${info.cooldownLeftMs} мс`,
+            info,
+          );
+          const key = `${info.modelId}|${info.display}`;
+          if (notifiedRouteTimeouts.has(key)) return;
+          notifiedRouteTimeouts.add(key);
+          proxyState.notify?.(
+            t("proxyRouteTimeout", {
+              host: info.display,
+              model: info.modelId,
+              seconds: Math.max(1, Math.round(info.cooldownLeftMs / 1000)),
+            }),
+            "warning",
+          );
         },
         onDirectFallback: (allowed: boolean) => {
           if (proxyEmptyPoolNotified) return;
@@ -620,6 +661,7 @@ function ensureTransportInstalled(): void {
     {
       proxyUrl: !ringMode && proxyReady ? proxyState.url : undefined,
       proxyPool: proxyRing,
+      requestTimeouts,
       rotation,
       onObserved: (status, headers) => {
         metrics.noteResponse(status);

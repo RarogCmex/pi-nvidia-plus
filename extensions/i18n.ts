@@ -205,6 +205,10 @@ export const MESSAGES = {
     en: "proxy pin switches: {n}",
     ru: "смен pin прокси: {n}",
   },
+  metricsGroupRouteTimeouts: {
+    en: "request timeouts on exit routes: {n}",
+    ru: "таймаутов запроса на маршрутах: {n}",
+  },
   metricsGroupTruncatedStreams: {
     en: "truncated streams: {n}",
     ru: "оборванных потоков: {n}",
@@ -234,6 +238,16 @@ export const MESSAGES = {
   proxyEndpointUnreachable: {
     en: "NIM proxy {url} unreachable ({detail})",
     ru: "прокси NIM {url} недоступен ({detail})",
+  },
+
+  // ── Таймауты живого пути (исследование 10, §3) ──────────────────────
+  proxyRouteTimeout: {
+    en: "exit {host} did not answer within the request timeout — model {model} bypasses this route for {seconds}s (the next request will use another exit)",
+    ru: "выход {host} не уложился в таймаут запроса — модель {model} обходит этот маршрут {seconds} с (следующий запрос пойдёт через другой выход)",
+  },
+  proxyTimeoutEnvInvalid: {
+    en: "{name}={value} is not a valid timeout in milliseconds — using {ms} ms instead",
+    ru: "{name}={value} — не таймаут в миллисекундах, использую {ms} мс",
   },
 
   // ── Пул прокси: разбор эндпоинтов (spec proxy-pool) ──────────────────

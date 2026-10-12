@@ -16,6 +16,7 @@ import { t } from "./i18n.ts";
 import {
   PROXY_QUARANTINE_MS,
   isConnectClassError,
+  isRequestTimeoutError,
   maskProxy,
   redactProxyCredentials,
   type ProxyPick,
@@ -481,7 +482,7 @@ export interface RotationLayerOptions {
  * (итераторы) на этом этапе не распарсиваем — тогда кулдаун ведётся по
  * глобальному бакету ключа, как до тикета 22.
  */
-function extractModelFromBody(body: unknown): string | undefined {
+export function extractModelFromBody(body: unknown): string | undefined {
   let text: string | undefined;
   if (typeof body === "string") text = body;
   else if (body instanceof Uint8Array) text = new TextDecoder().decode(body);
@@ -1180,6 +1181,169 @@ export function withInBandOverloadRetry(target: DispatchTarget, config: InBandRe
 }
 
 /* ------------------------------------------------------------------ */
+/* Таймауты живого пути запроса (исследование 10, §3)                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Надзиратель таймаутов одного запроса: заголовки должны прийти за
+ * `headersTimeoutMs` от dispatch, тело — не молчать дольше `bodyTimeoutMs`
+ * (таймер бездействия, сбрасывается каждым чанком). Конурация запроса
+ * (`conn` из `onRequestStart`) при необходимости получает `abort()`; если
+ * надзиратель сработал раньше ундичи, ошибка синтезируется сама — с собственными
+ * кодами `PI_NVIDIA_PLUS_*_TIMEOUT` (коды ундичи не переиспользуются: OpenAI SDK
+ * внутри пи, увидев `UND_ERR_HEADERS_TIMEOUT` в cause, подменяет сообщение
+ * заготовкой «…configure… headersTimeout…»; кольцо классифицирует обе семьи
+ * одним классификатором `isRequestTimeoutError` — по коду или тексту).
+ *
+ * Зачем слой, если ундичи умеет это сам: у нативного пути есть дырка —
+ * per-origin Pool внутри `Socks5ProxyAgent` в ундичи 8.10 НЕ принимает опций
+ * (проверено по исходникам), то есть socks5-выходы остаются на дефолте 300 с.
+ * Свой слой один для всех транспортов и тестируется офлайн на локальном
+ * сервере. При этом собственные таймауты пула (http/https) никуда не деваются:
+ * сработает тот, что раньше.
+ */
+export interface RequestTimeoutConfig {
+  /** Потолок ожидания заголовков ответа от dispatch, мс. */
+  headersTimeoutMs: number;
+  /** Потолок бездействия стрима между чанками, мс. */
+  bodyTimeoutMs: number;
+}
+
+interface AbortableConn {
+  pause?: () => void;
+  resume?: () => void;
+  abort?: (reason?: unknown) => void;
+}
+
+function syntheticTimeoutError(kind: "headers" | "body", ms: number, cause?: unknown): Error {
+  const err = new Error(
+    kind === "headers" ? `Headers timeout after ${ms} ms (NVIDIA_NIM_HEADERS_TIMEOUT_MS)` : `Body timeout after ${ms} ms (NVIDIA_NIM_BODY_TIMEOUT_MS)`,
+  );
+  // Свои коды, а не UND_ERR_*: OpenAI SDK внутри пи видит код
+  // UND_ERR_HEADERS_TIMEOUT в cause и подменяет сообщение своей заготовкой
+  // «…configure a matching undici fetch… headersTimeout…» — совет про
+  // ненастроенный диспетчер, а наш таймаут — сознательный потолок надзора.
+  // Таймаут SDK распознаёт и по тексту (/timed? ?out/i — проверено по
+  // исходникам client.ts), тогда пользователь видит чистое «Request timed
+  // out.»; кольцо классифицирует по этим же кодам и тексту (isRequestTimeoutError).
+  (err as NodeJS.ErrnoException).code =
+    kind === "headers" ? "PI_NVIDIA_PLUS_HEADERS_TIMEOUT" : "PI_NVIDIA_PLUS_BODY_TIMEOUT";
+  if (cause !== undefined) (err as { cause?: unknown }).cause = cause;
+  return err;
+}
+
+/**
+ * Цель-диспетчер с надзором таймаутов: самый внутренний слой над bare-агентом
+ * (каждая попытка ротации ключей и каждый повтор получает свои надзиратели).
+ * Повторяет приём буферизации тела: setTimeout держит ссылку только до
+ * конца запроса; аборт ферря (Esc) срабатывает через conn.abort самой ундичи.
+ */
+export function withRequestTimeouts(target: DispatchTarget, config: RequestTimeoutConfig): SelectiveDispatcherHandle {
+  return {
+    dispatch(opts: unknown, handler: unknown): boolean {
+      const real = (handler && typeof handler === "object" ? handler : null) as Record<string, unknown> | null;
+      const call = (name: string, ...args: unknown[]): unknown => callHandlerMethod(real, name, ...args);
+
+      let conn: AbortableConn | null = null;
+      let headersTimer: ReturnType<typeof setTimeout> | undefined;
+      let bodyTimer: ReturnType<typeof setTimeout> | undefined;
+      let fired = false;
+      let settled = false;
+
+      const clearTimers = (): void => {
+        if (headersTimer !== undefined) {
+          clearTimeout(headersTimer);
+          headersTimer = undefined;
+        }
+        if (bodyTimer !== undefined) {
+          clearTimeout(bodyTimer);
+          bodyTimer = undefined;
+        }
+      };
+
+      const finish = (): void => {
+        settled = true;
+        clearTimers();
+      };
+
+      const fire = (kind: "headers" | "body"): void => {
+        if (settled || fired) return;
+        fired = true;
+        clearTimers();
+        const ms = kind === "headers" ? config.headersTimeoutMs : config.bodyTimeoutMs;
+        try {
+          conn?.abort?.(); // штатный аборт запроса в пуле, если конн уже есть
+        } catch {
+          // аборт — best effort: синтетическая ошибка уже доставлена ниже
+        }
+        call("onResponseError", conn, syntheticTimeoutError(kind, ms));
+      };
+
+      const wrap = {
+        onRequestStart(c: unknown, context: unknown) {
+          conn = (c ?? null) as AbortableConn | null;
+          call("onRequestStart", c, context);
+        },
+        onResponseStarted() {
+          if (settled || fired) return;
+          call("onResponseStarted");
+        },
+        onResponseStart(c: unknown, status: number, headers: unknown, statusMessage: unknown) {
+          if (settled || fired) return;
+          if (headersTimer !== undefined) {
+            clearTimeout(headersTimer);
+            headersTimer = undefined;
+          }
+          bodyTimer = setTimeout(() => fire("body"), config.bodyTimeoutMs);
+          bodyTimer.unref?.();
+          call("onResponseStart", c, status, headers, statusMessage);
+        },
+        onResponseData(c: unknown, chunk: unknown) {
+          if (settled || fired) return;
+          if (bodyTimer !== undefined) {
+            clearTimeout(bodyTimer);
+            bodyTimer = undefined;
+          }
+          bodyTimer = setTimeout(() => fire("body"), config.bodyTimeoutMs);
+          bodyTimer.unref?.();
+          call("onResponseData", c, chunk);
+        },
+        onResponseEnd(c: unknown, trailers: unknown) {
+          if (settled || fired) return;
+          finish();
+          call("onResponseEnd", c, trailers);
+        },
+        onResponseError(c: unknown, err: unknown) {
+          if (settled) return;
+          if (fired) {
+            // наш аборт пришёл из ундичи — ошибка уже синтезирована и доставлена
+            finish();
+            return;
+          }
+          finish();
+          call("onResponseError", c, err);
+        },
+        onRequestUpgrade(c: unknown, status: number, headers: unknown, socket: unknown) {
+          if (settled || fired) return;
+          finish();
+          call("onRequestUpgrade", c, status, headers, socket);
+        },
+      };
+
+      headersTimer = setTimeout(() => fire("headers"), config.headersTimeoutMs);
+      headersTimer.unref?.();
+      try {
+        return target.dispatch(opts, wrap);
+      } catch (err) {
+        finish();
+        throw err;
+      }
+    },
+    ...forwardLifecycle(target),
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Кольцо прокси: pin-инвариант (spec proxy-pool, фаза 1)                 */
 /* ------------------------------------------------------------------ */
 
@@ -1202,6 +1366,8 @@ export interface ProxyRingOptions {
   onPinSwitch?(info: { from?: string; to: string }): void;
   /** CONNECT-ошибка → карантин (уведомление; display identity + готовое сообщение). */
   onQuarantine?(info: { display: string; cooldownMs: number; detail: string; message: string }): void;
+  /** Таймаут запроса на маршруте «модель × выход» — маршрут обходится TTL (уведомление; display identity + id модели). */
+  onRouteTimeout?(info: { display: string; modelId: string; cooldownLeftMs: number }): void;
   /** Пустой пул: `allowed` — маршрут ушёл в direct (флаг on); иначе запрос остановлен (story 35: без флага origin IP не светим). */
   onDirectFallback?(allowed: boolean): void;
   now?: () => number;
@@ -1257,80 +1423,101 @@ export function withProxyRing(base: DispatchTarget, options: ProxyRingOptions): 
 
   return {
     dispatch(opts: unknown, handler: unknown): boolean {
-      let pick: ProxyPick;
-      let href: string | undefined;
-      try {
-        const pool = options.getPoolHrefs();
-        options.rotator.setPool(pool);
-        reconcile(pool);
-        pick = options.rotator.pick((options.now ?? Date.now)(), {
-          rotationEnabled: options.rotationEnabled(),
+      // Тело буферизуется ДО пика: модель из него скоупит обход зависших
+      // маршрутов (исследование 10, §3), а внутренним слоям достаётся уже
+      // воспроизводимое тело. Возврат true — сразу, как в ротации ключей:
+      // вся работа — в асинхронном продолжении, abort (Esc) работает через
+      // signal самого opts и через хендлеры.
+      bufferRequestBody((opts as { body?: unknown } | null)?.body)
+        .then((body) => {
+          const record = (opts ?? {}) as Record<string, unknown>;
+          const modelId = extractModelFromBody(body);
+          let pick: ProxyPick;
+          let href: string | undefined;
+          try {
+            const pool = options.getPoolHrefs();
+            options.rotator.setPool(pool);
+            reconcile(pool);
+            pick = options.rotator.pick((options.now ?? Date.now)(), {
+              rotationEnabled: options.rotationEnabled(),
+              modelId,
+            });
+            if (pick.kind === "proxy") href = pick.href;
+          } catch {
+            pick = { kind: "direct" }; // подготовка не должна ломать запрос
+          }
+          if (pick.kind !== "proxy" || !href) {
+            // Пустой пул: direct только с явным флагом; иначе — понятная ошибка
+            // без обращения в сеть (origin IP не покидает машину).
+            const allowed = options.directFallbackEnabled();
+            options.onDirectFallback?.(allowed);
+            if (allowed) return base.dispatch({ ...record, body }, handler);
+            deliverRingBlocked(handler);
+            return;
+          }
+
+          const display = maskProxy(href);
+          if (lastPinDisplay !== undefined && lastPinDisplay !== display) {
+            options.onPinSwitch?.({ from: lastPinDisplay, to: display });
+          }
+          lastPinDisplay = display;
+
+          // Наблюдение исхода: CONNECT-класс → карантин + переписывание ошибки в
+          // понятную (display identity); успех → markOk (снимает карантин, пишет
+          // exit quality) и снимает обход маршрута; таймаут запроса → обход
+          // «модель × выход» TTL. 429/401/403/5xx/in-band — НЕ прокси: их
+          // обрабатывают внутренние слои (ротация ключей, транспортный повтор).
+          // Abort (Esc) — тоже исход: занятость освобождается, карантин не ставится.
+          const startedAt = (options.now ?? Date.now)();
+          let settled = false;
+          let removeAbortListener: (() => void) | undefined;
+          const settle = (): boolean => {
+            if (settled) return false;
+            settled = true;
+            options.rotator.releaseInFlight(href!);
+            removeAbortListener?.();
+            return true;
+          };
+
+          // Создание агента — внутри try: конструктор может бросить (старый ундичи
+          // без Socks5ProxyAgent на socks-href, битый URL) — тогда выход карантинится
+          // и следующий dispatch берёт соседа, а fetch-вызывающий не падает.
+          let entry: RingEntry;
+          try {
+            entry = entryFor(href);
+          } catch (err) {
+            options.rotator.markConnectFailed(href, startedAt);
+            options.onQuarantine?.({
+              display,
+              cooldownMs: PROXY_QUARANTINE_MS,
+              detail: err instanceof Error ? err.message : String(err),
+              message: describeEndpointFailure(display, err),
+            });
+            deliverRingError(handler, href, display, err, options, modelId);
+            return;
+          }
+
+          const wrapped = wrapRingHandler(handler, href, display, options, startedAt, settle, modelId);
+          options.rotator.noteInFlight(href);
+          removeAbortListener = hookAbortRelease((opts as { signal?: unknown } | null)?.signal, settle);
+          try {
+            entry.stacked.dispatch({ ...record, body }, wrapped);
+          } catch (err) {
+            // Синхронный провал dispatch: отдаём ошибку хендлеру как CONNECT-исход.
+            settle();
+            deliverRingError(handler, href, display, err, options, modelId);
+          }
+        })
+        .catch((err) => {
+          // Буферизация тела сорвалась (прерванный итератор и т.п.) —
+          // отдаём ошибку без выбора выхода.
+          deliverHandlerError(
+            (handler && typeof handler === "object" ? handler : null) as Record<string, unknown> | null,
+            new RotationController(),
+            err,
+          );
         });
-        if (pick.kind === "proxy") href = pick.href;
-      } catch {
-        pick = { kind: "direct" }; // подготовка не должна ломать запрос
-      }
-      if (pick.kind !== "proxy" || !href) {
-        // Пустой пул: direct только с явным флагом; иначе — понятная ошибка
-        // без обращения в сеть (origin IP не покидает машину).
-        const allowed = options.directFallbackEnabled();
-        options.onDirectFallback?.(allowed);
-        if (allowed) return base.dispatch(opts, handler);
-        deliverRingBlocked(handler);
-        return true;
-      }
-
-      const display = maskProxy(href);
-      if (lastPinDisplay !== undefined && lastPinDisplay !== display) {
-        options.onPinSwitch?.({ from: lastPinDisplay, to: display });
-      }
-      lastPinDisplay = display;
-
-      // Наблюдение исхода: CONNECT-класс → карантин + переписывание ошибки в
-      // понятную (display identity); успех → markOk (снимает карантин, пишет
-      // exit quality). 429/401/403/5xx/in-band — НЕ прокси: их обрабатывают
-      // внутренние слои (ротация ключей, транспортный повтор). Abort (Esc) —
-      // тоже исход: занятость освобождается, карантин не ставится.
-      const startedAt = (options.now ?? Date.now)();
-      let settled = false;
-      let removeAbortListener: (() => void) | undefined;
-      const settle = (): boolean => {
-        if (settled) return false;
-        settled = true;
-        options.rotator.releaseInFlight(href!);
-        removeAbortListener?.();
-        return true;
-      };
-
-      // Создание агента — внутри try: конструктор может бросить (старый ундичи
-      // без Socks5ProxyAgent на socks-href, битый URL) — тогда выход карантинится
-      // и следующий dispatch берёт соседа, а fetch-вызывающий не падает.
-      let entry: RingEntry;
-      try {
-        entry = entryFor(href);
-      } catch (err) {
-        options.rotator.markConnectFailed(href, startedAt);
-        options.onQuarantine?.({
-          display,
-          cooldownMs: PROXY_QUARANTINE_MS,
-          detail: err instanceof Error ? err.message : String(err),
-          message: describeEndpointFailure(display, err),
-        });
-        deliverRingError(handler, href, display, err, options);
-        return true;
-      }
-
-      const wrapped = wrapRingHandler(handler, href, display, options, startedAt, settle);
-      options.rotator.noteInFlight(href);
-      removeAbortListener = hookAbortRelease((opts as { signal?: unknown } | null)?.signal, settle);
-      try {
-        return entry.stacked.dispatch(opts, wrapped);
-      } catch (err) {
-        // Синхронный провал dispatch: отдаём ошибку хендлеру как CONNECT-исход.
-        settle();
-        deliverRingError(handler, href, display, err, options);
-        return true;
-      }
+      return true;
     },
     close(): Promise<void> {
       const jobs: Array<Promise<void> | undefined> = [Promise.resolve((base as { close?: () => Promise<void> }).close?.())];
@@ -1362,6 +1549,7 @@ function wrapRingHandler(
   options: ProxyRingOptions,
   startedAt: number,
   settle: () => boolean,
+  modelId: string | undefined,
 ): unknown {
   if (!handler || typeof handler !== "object") return handler;
   const h = handler as Record<string, unknown>;
@@ -1373,9 +1561,11 @@ function wrapRingHandler(
     h.onResponseStart = function (controller: unknown, status: number, headers: unknown, statusMessage: unknown) {
       if (settle()) {
         // Любой HTTP-статус — выход достижим (exit quality); 429/5xx — бакеты
-        // ключа/транспорта, прокси они не трогают.
+        // ключа/транспорта, прокси они не трогают. Заголовки дошли — маршрут
+        // «модель × выход» жив, его обход (если был) снимается.
         const latencyMs = Math.max(0, ((options.now ?? Date.now)()) - startedAt);
         options.rotator.markOk(href, latencyMs);
+        if (modelId) options.rotator.clearRequestTimeout(modelId, href);
       }
       return original.call(this, controller, status, headers, statusMessage);
     };
@@ -1384,7 +1574,7 @@ function wrapRingHandler(
     const original = h.onResponseError as (...args: unknown[]) => unknown;
     h.onResponseError = function (controller: unknown, err: unknown) {
       if (settle()) {
-        const rewritten = noteRingError(href, display, err, options);
+        const rewritten = noteRingError(href, display, err, options, modelId);
         return original.call(this, controller, rewritten);
       }
       return original.call(this, controller, err);
@@ -1424,8 +1614,30 @@ function deliverRingBlocked(handler: unknown): void {
   }
 }
 
-/** CONNECT-ошибка → карантин + понятное сообщение; прочее — как есть. */
-function noteRingError(href: string, display: string, err: unknown, options: ProxyRingOptions): unknown {
+/**
+ * CONNECT-ошибка → карантин + понятное сообщение; таймаут запроса → обход
+ * маршрута «модель × выход» TTL (исследование 10, §3); прочее — как есть.
+ */
+function noteRingError(
+  href: string,
+  display: string,
+  err: unknown,
+  options: ProxyRingOptions,
+  modelId: string | undefined,
+): unknown {
+  if (isRequestTimeoutError(err)) {
+    // Таймаут — не CONNECT: выход достижим, но маршрут «модель × выход» молчит.
+    // Карантин выхода НЕ ставим (замер 2026-10-12: один и тот же выход в одну
+    // минуту виснет на одной модели и отвечает на другой) — только скоупленный
+    // обход; следующий пик этой модели берёт соседа, остальные модели не страдают.
+    if (modelId) {
+      const left = options.rotator.noteRequestTimeout(modelId, href, (options.now ?? Date.now)());
+      if (left > 0) {
+        options.onRouteTimeout?.({ display, modelId, cooldownLeftMs: left });
+      }
+    }
+    return err;
+  }
   if (!isProxyConnectError(err)) return err;
   options.rotator.markConnectFailed(href);
   const message = describeEndpointFailure(display, err);
@@ -1442,8 +1654,15 @@ function noteRingError(href: string, display: string, err: unknown, options: Pro
 }
 
 /** Синхронный провал dispatch: тот же путь, что onResponseError. */
-function deliverRingError(handler: unknown, href: string, display: string, err: unknown, options: ProxyRingOptions): void {
-  const rewritten = noteRingError(href, display, err, options);
+function deliverRingError(
+  handler: unknown,
+  href: string,
+  display: string,
+  err: unknown,
+  options: ProxyRingOptions,
+  modelId: string | undefined,
+): void {
+  const rewritten = noteRingError(href, display, err, options, modelId);
   const h = handler as Record<string, unknown> | null;
   if (typeof h?.onResponseError === "function") {
     try {
@@ -1617,6 +1836,8 @@ export interface InstallOptions {
   proxyUrl?: URL;
   /** Пул прокси (новая форма). Если задан — ставится кольцо, `proxyUrl` игнорируется. */
   proxyPool?: ProxyPoolInstallConfig;
+  /** Надзор таймаутов живого пути (самый внутренний слой над bare-агентом; исследование 10, §3). `undefined` — без надзора (поведение как раньше). */
+  requestTimeouts?: RequestTimeoutConfig;
   onObserved?: (status: number, headers: Record<string, string>) => void;
   onDiagnostic?: (diagnostic: NimDiagnostic) => void;
   onProxyError?: (message: string, cause: unknown) => void;
@@ -1683,7 +1904,11 @@ export function ensureDispatcherInstalled(deps: DispatcherDeps, options: Install
   // повтор 429/5xx → ротация ключей. Все per-href лук-и разделяют ОДИН
   // key-ротатор и пул ключей (их инжектирует вызывающая сторона в `rotation`).
   const stackInner = (bare: DispatchTarget): DispatchTarget => {
-    const inBanded = options.inBandRetry ? withInBandOverloadRetry(bare, options.inBandRetry) : bare;
+    // Надзор таймаутов — самый внутренний слой: каждая попытка ротации ключей
+    // и каждый повтор получает свои таймеры; аборт после срабатывания надзора
+    // приходит в кольцо как обычная ошибка и классифицируется (обход маршрута).
+    const timed = options.requestTimeouts ? withRequestTimeouts(bare, options.requestTimeouts) : bare;
+    const inBanded = options.inBandRetry ? withInBandOverloadRetry(timed, options.inBandRetry) : timed;
     const retried =
       options.retry && deps.createRetryAgent
         ? withTransparentRetry(inBanded, options.retry, { createRetryAgent: deps.createRetryAgent })

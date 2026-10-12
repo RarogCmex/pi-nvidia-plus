@@ -134,6 +134,7 @@ function makeRing(opts: {
   stack?: (bare: DispatchTarget) => DispatchTarget;
   createAgent?: (href: string) => DispatchTarget | undefined;
   now?: () => number;
+  onRouteTimeout?: (info: { display: string; modelId: string; cooldownLeftMs: number }) => void;
 }): RingHarness {
   const rotator = new ProxyRotator({ random: () => 0, quarantineMs: PROXY_QUARANTINE_MS });
   const agents = new Map<string, AgentTarget>();
@@ -182,6 +183,7 @@ function makeRing(opts: {
       },
       onPinSwitch: (info) => harness.switches.push(info),
       onQuarantine: (info) => harness.quarantined.push(info.display),
+      onRouteTimeout: opts.onRouteTimeout,
       onDirectFallback: (allowed) => harness.directFallbackCalls.push({ allowed }),
       now: opts.now,
     },
@@ -499,6 +501,53 @@ function makeRing(opts: {
   assert.equal(result.installed, true);
   assert.strictEqual(result.nvidiaDirect, proxyAgent, "nvidiaDirect — единственный ProxyAgent (как сегодня)");
   assert.strictEqual(getNvidiaDirectDispatcher(), proxyAgent, "keys check идёт через тот же keep-alive агент");
+}
+
+/* ── N. Таймаут запроса на «модели × выходе» (исследование 10, §3):
+ *      выход НЕ карантинится, но пик для зависшей модели уходит на соседа;
+ *      маршрут обходится TTL; ошибка доходит до пи с исходным кодом. */
+{
+  const routeTimeouts: Array<{ display: string; modelId: string; cooldownLeftMs: number }> = [];
+  const h = makeRing({
+    respond: (href) =>
+      href === "http://a:1/"
+        ? { error: Object.assign(new Error("Headers timeout after 60000 ms (NVIDIA_NIM_HEADERS_TIMEOUT_MS)"), { code: "UND_ERR_HEADERS_TIMEOUT" }) }
+        : { status: 200, body: "ок" },
+    onRouteTimeout: (info) => routeTimeouts.push(info),
+  });
+  h.setPool(["http://a:1/", "http://b:2/"]);
+  const quarantinedBefore = h.quarantined.length;
+
+  const bodyOf = (model: string) => JSON.stringify({ model, messages: [{ role: "user", content: "hi" }] });
+  const r1 = makeReceiver();
+  h.ring.dispatch({ origin: "https://integrate.api.nvidia.com", body: bodyOf("z-ai/glm-5.3") }, r1);
+  await flush();
+  assert.ok(r1.rec.error instanceof Error, "таймаут дошёл до пи как ошибка");
+  assert.equal((r1.rec.error as NodeJS.ErrnoException).code, "UND_ERR_HEADERS_TIMEOUT", "код не переписан");
+  assert.equal(h.quarantined.length, quarantinedBefore, "выход НЕ карантинится за таймаут");
+  assert.ok(h.rotator.cooldownLeft("http://a:1/", Date.now()) === 0, "cooldown не поставлен");
+  assert.ok(h.rotator.routeAvoidLeft("z-ai/glm-5.3", "http://a:1/", Date.now()) > 0, "маршрут glm×a на обходе");
+  assert.deepEqual(
+    routeTimeouts.map((i) => ({ display: i.display, modelId: i.modelId })),
+    [{ display: "a:1", modelId: "z-ai/glm-5.3" }],
+    "уведомление об обходе: display identity + id модели",
+  );
+
+  // Следующий dispatch той же модели — сосед (обход сработал, pin переехал).
+  const r2 = makeReceiver();
+  h.ring.dispatch({ origin: "https://integrate.api.nvidia.com", body: bodyOf("z-ai/glm-5.3") }, r2);
+  await flush();
+  assert.equal(r2.rec.status, 200);
+  assert.equal(h.attempts[h.attempts.length - 1].href, "http://b:2/", "glm ушла с зависшего маршрута");
+  assert.equal(h.rotator.routeAvoidLeft("z-ai/glm-5.3", "http://b:2/", Date.now()), 0, "успех на glm×b — без обхода");
+
+  // Тело без модели: скоупить обход нельзя, уведомления нет.
+  const before = routeTimeouts.length;
+  const r3 = makeReceiver();
+  h.ring.dispatch({ origin: "https://integrate.api.nvidia.com", body: "{}" }, r3);
+  await flush();
+  assert.equal(r3.rec.status, 200, "pin b отвечает");
+  assert.equal(routeTimeouts.length, before, "без id модели — без уведомления об обходе");
 }
 
 console.log("proxy-ring: все проверки прошли");

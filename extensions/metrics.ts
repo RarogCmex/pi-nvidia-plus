@@ -19,6 +19,8 @@ export interface MetricsSnapshot {
   cooldownWaits: number;
   /** Смены pin прокси между последовательными nvidia-dispatch (spec proxy-pool). */
   proxySwitches: number;
+  /** Таймауты запроса на маршруте «модель × выход» — поставлены на обход (исследование 10, §3). */
+  routeTimeouts: number;
   /** Оборванные потоки: NIM закончил SSE без finish_reason после исчерпания повторов пи. */
   truncatedStreams: number;
   /** Дегенеративные ответы при HTTP 200: коллапс, утечка токена, пустой ответ (исследование 06). */
@@ -33,6 +35,7 @@ export class SessionMetrics {
   deadKeys = 0;
   cooldownWaits = 0;
   proxySwitches = 0;
+  routeTimeouts = 0;
   truncatedStreams = 0;
   degenerateResponses = 0;
 
@@ -49,6 +52,7 @@ export class SessionMetrics {
       deadKeys: this.deadKeys,
       cooldownWaits: this.cooldownWaits,
       proxySwitches: this.proxySwitches,
+      routeTimeouts: this.routeTimeouts,
       truncatedStreams: this.truncatedStreams,
       degenerateResponses: this.degenerateResponses,
     };
@@ -76,6 +80,7 @@ export class SessionMetrics {
     if (this.deadKeys > 0) groups.push({ kind: "deadKeys", value: this.deadKeys });
     if (this.cooldownWaits > 0) groups.push({ kind: "cooldownWaits", value: this.cooldownWaits });
     if (this.proxySwitches > 0) groups.push({ kind: "proxySwitches", value: this.proxySwitches });
+    if (this.routeTimeouts > 0) groups.push({ kind: "routeTimeouts", value: this.routeTimeouts });
     if (this.truncatedStreams > 0) groups.push({ kind: "truncatedStreams", value: this.truncatedStreams });
     if (this.degenerateResponses > 0) groups.push({ kind: "degenerateResponses", value: this.degenerateResponses });
     return { responses, groups };
