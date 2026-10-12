@@ -21,7 +21,7 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
    - Explicit **off** really disables thinking where the model thinks by default.
 2. **Stale catalog.** Dead models (HTTP 410/404 on the live NIM endpoint) produce warnings instead of silent failures; missing live models can be added via `/nvidia-plus discover`.
 3. **Request normalization.** Text content-arrays are flattened to strings for older models; a default `max_tokens` is set when the model requires it.
-4. **Per-provider proxy pool.** `NVIDIA_NIM_PROXIES` (or `NVIDIA_NIM_PROXIES_FILE`, default `~/.pi/agent/nvidia-proxies.json`, legacy single `NVIDIA_NIM_PROXY`) route only `https://integrate.api.nvidia.com` through your exits; other providers are untouched. Each request pins one exit for its whole key/retry circle; a dead CONNECT goes to a 60 s quarantine, and `/nvidia-plus proxy check` measures latency and pins the fastest reachable exit.
+4. **Per-provider proxy pool.** `NVIDIA_NIM_PROXIES` (or `NVIDIA_NIM_PROXIES_FILE`, default `~/.pi/agent/nvidia-proxies.json`, legacy single `NVIDIA_NIM_PROXY`) route only `https://integrate.api.nvidia.com` through your exits; other providers are untouched. Each request pins one exit for its whole key/retry circle; a dead CONNECT goes to a 60 s quarantine, and `/nvidia-plus proxy check` measures latency and pins the fastest reachable exit. A hung route is model-scoped: a request timeout puts the **(model × exit)** pair on a 60 s bypass — the next request for that model goes through another exit, while other models keep using it (measured: the same exit hangs on one model and answers another in the same minute, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md)). Request timeouts themselves are capped by a watchdog layer (`NVIDIA_NIM_HEADERS_TIMEOUT_MS` 60 s / `NVIDIA_NIM_BODY_TIMEOUT_MS` 120 s) instead of undici's 300 s defaults.
 5. **Diagnostics.** `retry-after` and request IDs for 429/5xx are surfaced during pi's retry pauses.
 6. **Transparent in-band retry.** NIM sometimes answers an overloaded request with **HTTP 200** whose SSE stream carries `data: {"error":{"message":"Service temporarily overloaded"}}`. Both status-keyed layers (transport 429/5xx retry, key rotation) miss it, so it surfaces as a `stopReason: error` turn that pi's own retry layer hands straight to the model. The extension sniffs the first SSE event and transparently re-issues the request (3 retries, 5 s→30 s backoff), so pi and the model never see it. On exhaustion pi gets the original error unchanged. Toggle with `NVIDIA_NIM_TRANSPORT_RETRY`.
 7. **Truncated-stream detection.** NIM can drop an SSE stream mid-generation (typically on long thinking output or a gateway timeout): the stream ends without a `finish_reason` chunk and pi-ai throws `Stream ended without finish_reason`. pi retries this itself, so the extension only acts when retries are exhausted and the truncated message is finalized — it counts such streams in `/nvidia-plus status` and shows one throttled warning per minute with hints (lower thinking level, switch proxy exit, retry).
@@ -75,19 +75,28 @@ catalog stays authoritative. Two things are layered on top:
 **1. Metadata overrides** (`overrides/models.json`, applied to
 `~/.pi/agent/models.json` by `/nvidia-plus apply`, automatically on session
 start). Ten ids carry `reasoning: true` plus a `thinkingLevelMap`, which is what
-makes pi's `--thinking <level>` selector reachable for them at all:
+makes pi's `--thinking <level>` selector reachable for them at all. Where the
+live card disagrees with pi's generated catalog, the override also carries the
+corrected `contextWindow` (live-probe evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2):
 
 | id | pi level → injected |
 |---|---|
-| `nvidia/nemotron-3-super-120b-a12b` | `off`→off · `minimal`/`low`→low · `medium`…`max`→on |
+| `nvidia/nemotron-3-super-120b-a12b` | `off`→off · `minimal`/`low`→low · `medium`…`max`→on; `contextWindow` 1M (card says 1M, pi had 262k; a ~300K-token live probe passed) |
 | `nvidia/nemotron-3-ultra-550b-a55b` | same |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | same |
-| `nvidia/nemotron-3.5-lightning-30b-a3b` | same |
+| `nvidia/nemotron-3.5-lightning-30b-a3b` | same, plus `contextWindow` 1M (live-probe confirmed, as above) |
 | `moonshotai/kimi-k3` | native `reasoning_effort` (`supportsReasoningEffort: true`): `off`→none · `minimal`/`low`/`medium`/`high`/`xhigh`/`max`→identity. NIM accepts only `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — `off` is a 400, and omitting the field (the built-in default) leaves kimi reasoning unbounded, so `off` must send `none` (unlike `gpt-oss-20b`, where omitting is safe). Probed live 2026-10-05. |
 | `z-ai/glm-5.3`, `z-ai/glm-5.3-flash` | same |
 | `openai/gpt-oss-20b` | native `reasoning_effort`: `off`→omitted · `minimal`→low · `xhigh`/`max`→high |
 | `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
 | `deepseek-ai/deepseek-v4-flash-0731` | `supportsReasoningEffort: true` — **id is EOL on NIM**, the override is kept for the ids that still answer |
+
+A full model card ships as a `models` entry for **`deepseek-ai/deepseek-v4.1-flash`**
+(1M context, 384k max output, text+image input, `supportsReasoningEffort`). A
+bare `{"id": …}` entry in `models.json` would otherwise **replace** the built-in
+card with defaults (128k context, `reasoning: false`) — pi merges `models`
+entries by replacement, not by patch, so the full card is the only safe form.
+Thinking for the `deepseek-ai/deepseek-v4*` family is request-level (see below).
 
 **2. Per-request injection** (`extensions/transform.ts`), which covers families
 rather than individual ids — so a model pi has never seen still gets the right
@@ -97,7 +106,7 @@ wire parameters if its id matches a family prefix:
 |---|---|---|
 | `nvidia/nemotron-3*`, `nvidia/nemotron-3.5*` | `chat_template_kwargs.enable_thinking`, `low_effort` at `minimal`/`low` | live probes |
 | `z-ai/glm*` | `enable_thinking` + `clear_thinking`, `reasoning_effort` (`high`/`max`) | **hypothesis** — extrapolated from the family, not probed per id |
-| `deepseek-ai/deepseek-v4*` | `chat_template_kwargs.thinking` + `reasoning_effort` | probed 2026-08-28 (family now EOL) |
+| `deepseek-ai/deepseek-v4*` | `chat_template_kwargs.thinking` + `reasoning_effort` | probed 2026-08-28 on `-pro-0813`; family EOL except the new `-v4.1-flash` |
 | `minimaxai/minimax-m3` | `thinking_mode: disabled \| adaptive \| enabled` | id returns 410 |
 | `google/gemma-4*` | `enable_thinking=false` at **every** level | live probes — see Limitations |
 
@@ -150,6 +159,8 @@ Tab-completion covers subcommands and their arguments (including `proxy pin <hos
 | `NVIDIA_NIM_KEY_ROTATION` | `0`/`false`/`no`/`off` disables rotation. Default: enabled when a pool is configured. |
 | `NVIDIA_NIM_SHARED_ROTATION` | `0` disables cross-process shared state (`~/.pi/agent/nvidia-keys-state.json`). Default: enabled. |
 | `NVIDIA_NIM_TRANSPORT_RETRY` | `0` disables transparent retries — both 429/5xx **and** in-band `Service temporarily overloaded` (HTTP 200 + SSE error event). Default: enabled (3 retries each). |
+| `NVIDIA_NIM_HEADERS_TIMEOUT_MS` | Cap on waiting for response headers on the nvidia route (watchdog layer, applies to every pool/legacy exit and every retry attempt). Default: 60000. Clamped to [5000, 600000]; undici's own default is 300 s. |
+| `NVIDIA_NIM_BODY_TIMEOUT_MS` | Cap on stream inactivity between chunks on the nvidia route. Default: 120000. Same clamp. |
 | `PI_NVIDIA_PLUS_DEBUG` | `1` writes final payloads to `nvidia-plus-debug.log` in pi's agent dir (`~/.pi/agent/` by default). |
 | `PI_NVIDIA_PLUS_LANG` | `ru` or `en`. Overrides `LC_ALL` / `LC_MESSAGES` / `LANG` detection. |
 
@@ -192,22 +203,38 @@ mechanics — is written up in [`research/`](research/); start at
 - **Dead models warn, they do not disappear.** `DEAD_MODELS`
   (`extensions/dead-models.ts`) is a point-in-time audit (keyed probes of
   2026-08-26 and 2026-09-18; keyless 410 re-probe of 2026-10-05 turned the
-  410 entries into exact end-of-life dates). NIM retires ids without notice, so
+  410 entries into exact end-of-life dates; authorized re-test of 2026-10-12
+  confirmed every remaining 404 entry and released `meta/muse-glimmer-30b`,
+  which had come back to life). NIM retires ids without notice, so
   the list is always behind reality; selecting a listed id produces a warning
   naming the probe evidence, and an id that died *after* the audit fails the
   ordinary way.
-  Both headline thinking families this extension was built for are on that list
-  (DeepSeek V4, MiniMax M3).
+  The original thinking families this extension was built around — DeepSeek V4
+  (`-flash-0731`/`-pro-0813`) and MiniMax M3 — are on that list (the live
+  `deepseek-ai/deepseek-v4.1-flash` continues the family with a fresh id).
 - **Gemma 4 cannot think.** In thinking mode `google/gemma-4*` hangs — no
   response within the 120 s header timeout at any of plain / `reasoning_effort`
   / `enable_thinking=true`; with `chat_template_kwargs.enable_thinking=false` it
-  answers in ~2 s. The extension therefore force-disables thinking at every
-  level, including `--thinking high`. That is deliberate: the alternative is an
-  unusable model.
+  answered in ~2 s (probed 2026-09-18). The extension therefore force-disables
+  thinking at every level, including `--thinking high`. That is deliberate: the
+  alternative is an unusable model. As of 2026-10-12 the id hangs on **every**
+  tested route (direct + 10 exits), even with thinking disabled — a NIM-side
+  degradation of the model×exit route, which the timeout watchdog surfaces
+  quickly but cannot route around ([research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §3).
 - **GLM mappings are unverified hypotheses.** `z-ai/glm*` injection is
   extrapolated from the family, not probed id by id. If an upstream rejects
   `chat_template_kwargs`, the request 400s.
-- **kimi-k3 is flaky on NIM and slow.** Live probes of 2026-10-05
+- **NIM routes degrade per (model × exit), not per exit.** Measured
+  2026-10-12 ([research 10](research/10-nim-route-dependent-hangs-2026-10-12.md)):
+  the same exit hung on `z-ai/glm-5.3` while answering `moonshotai/kimi-k3` in
+  1.1 s in the same minute, and the direct route hung where pool exits answered.
+  The extension reacts by bypassing the hung (model × exit) pair for 60 s and
+  capping request timeouts — but when **every** route hangs for a model (as
+  `deepseek-ai/deepseek-v4.1-flash` and `google/gemma-4-31b-it` did on
+  2026-10-12), no amount of rotation helps; the model is simply unusable until
+  NIM recovers. pi does not retry transport errors, so a timed-out request
+  surfaces as an error turn — re-issue it.
+- **kimi-k3 is flaky on NIM and route-dependent.** Live probes of 2026-10-05
   ([`research/07`](research/07-kimi-k3-thinking-probe.md)) show `moonshotai/kimi-k3`
   takes ~2–4 min even for a one-word answer and, on a trivial prompt, returns a
   repetition collapse (`content: null`, `reasoning_content: "The!!!…"`,
@@ -216,8 +243,10 @@ mechanics — is written up in [`research/`](research/); start at
   a model-side fault, not a mapping artifact: the extension sends the valid NIM
   variant (`off`→`none`; `off`→`"off"` was an HTTP 400 and the built-in map was
   inert), and the degenerate-output detector (§8 above) catches each collapse and
-  tells you to repeat the request. No `reasoning_effort` value makes kimi-k3
-  reliable; if it collapses, retry.
+  tells you to repeat the request. A working route answered in 1.1 s on
+  2026-10-12 — so before blaming the model, let the route-bypass move you to
+  another exit. No `reasoning_effort` value makes kimi-k3 reliable; if it
+  collapses, retry.
 - **Billing is out of scope.** The extension does not read, estimate or report
   NIM cost; pi's own cost accounting for the `nvidia` provider is untouched.
 - **Overrides are per-id, not per-family.** An id absent from
