@@ -151,14 +151,17 @@ export function loadDiscoveryReport(paths: StorePaths = storePaths()): Discovery
 /**
  * Применить оверрайды к `models.json` и обновить леджер. Идемпотентно.
  * Желаемое состояние — оверрайд-файл пакета плюс найденные живым обнаружением
- * модели; обе части под одним леджером владения.
+ * модели; обе части под одним леджером владения. Курированное важнее
+ * найденного: оверрайд-файл мержится ПОВЕРХ discovered (исследование 10, §2 —
+ * голая `{id}` из discovered раньше затирала полноценную карточку: mergeModelsJson
+ * источник, и порядок был выбран наоборот).
  * `overwrite: false` (автоприменение) — конфликтные записи пропускаются;
  * `overwrite: true` (явная команда с `force`) — перезаписываются.
  */
 export function applyFiles(overwrite: boolean, paths: StorePaths = storePaths()): ApplyFilesResult {
   const overrides = loadOverrides(paths);
   const discovered = loadDiscovered(paths).desired;
-  const desired = discovered.providers ? mergeModelsJson(overrides, discovered).merged : overrides;
+  const desired = discovered.providers ? mergeModelsJson(discovered, overrides).merged : overrides;
   const target = (readJson(paths.modelsJson) ?? {}) as ModelsJson;
   const ledger = loadState(paths);
 

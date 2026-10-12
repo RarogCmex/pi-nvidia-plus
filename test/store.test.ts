@@ -111,6 +111,32 @@ assert.ok(defaults.modelsJson.endsWith(join(".pi", "agent", "models.json")), "д
   assert.equal(second.conflicts.length, 0);
 }
 
+// 2b. Курированное важнее найденного: discovered-запись `{id}` НЕ затирает
+// полноценную models-карточку оверрайд-файла (исследование 10, §2 — порядок
+// слияния раньше позволял discover сломать карточку 1M дефолтами).
+{
+  const base = freshDir("apply-discovered-order");
+  const overridesFile = join(base, "overrides.json");
+  writeOverrides(overridesFile); // models: [{id: moonshotai/kimi-k3, contextWindow: 1048576, …}]
+  const p = storePaths(base, overridesFile);
+  writeFileSync(
+    p.discoveredFile,
+    JSON.stringify({ models: [{ id: "moonshotai/kimi-k3" }], report: { at: "2026-10-12T00:00:00Z" } }),
+    "utf8",
+  );
+
+  const applied = applyFiles(false, p);
+  assert.ok(applied.changed);
+  const models = readModels(p);
+  const kimi = models.providers.nvidia.models.find((m: any) => m.id === "moonshotai/kimi-k3");
+  assert.equal(kimi.contextWindow, 1048576, "голая discovered-запись затёрла карточку оверрайд-файла");
+  assert.equal(kimi.maxTokens, 131072, "maxTokens карточки потерялся");
+
+  // Идентичность после повторного применения сохраняется (голый id не воскресает).
+  const again = applyFiles(false, p);
+  assert.equal(again.changed, false);
+}
+
 // 3. Пользовательская запись на нашем id — конфликт; без `force` пропускается.
 {
   const base = freshDir("apply-conflict");
