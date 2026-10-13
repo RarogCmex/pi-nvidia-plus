@@ -9,7 +9,9 @@ import {
   deepEqual,
   mergeModelsJson,
   mergeOwnedStates,
+  MODELS_SCHEMA_URL,
   rollbackOverrides,
+  withModelsSchema,
   type ModelsJson,
   type OwnedState,
 } from "../extensions/merge-models.ts";
@@ -228,6 +230,24 @@ assert.equal(rollbackOverrides(once, emptyLedger).changed, false);
     "изменённая пользователем устаревшая запись удалена");
   assert.ok(kept.state.providers.nvidia.models["moonshotai/kimi-k3"],
     "изменённая устаревшая запись не осталась в леджере");
+}
+
+// 17. withModelsSchema: добавляет ключ только в файл без `$schema`;
+// чужое значение не трогает, порядок ключей ставит `$schema` первым.
+{
+  const marked = withModelsSchema({ providers: { nvidia: {} } });
+  assert.equal(marked.$schema, MODELS_SCHEMA_URL);
+  assert.equal(Object.keys(marked)[0], "$schema", "$schema не стоит первым ключом");
+  assert.deepEqual(marked.providers, { nvidia: {} }, "содержимое файла изменено");
+
+  const foreign: ModelsJson = { $schema: "./my-local.schema.json", providers: { nvidia: {} } };
+  const untouched = withModelsSchema(foreign);
+  assert.equal(untouched.$schema, "./my-local.schema.json", "чужое $schema перезаписано");
+  assert.equal(untouched, foreign, "файл с чужим $schema скопирован напрасно");
+
+  // Нестроковое значение ключа — сломан, заменяем каноническим.
+  assert.equal(withModelsSchema({ $schema: 42 as unknown as string }).$schema, MODELS_SCHEMA_URL,
+    "сломанный $schema не починен");
 }
 
 console.log("merge-models: все проверки прошли");

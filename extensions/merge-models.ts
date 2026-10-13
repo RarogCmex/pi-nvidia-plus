@@ -25,8 +25,27 @@ export interface ProviderEntry {
 }
 
 export interface ModelsJson {
+  /** Ссылка на опубликованную pi 1.2.0 JSON-схему (см. `withModelsSchema`). */
+  $schema?: string;
   providers?: Record<string, ProviderEntry>;
   [key: string]: unknown;
+}
+
+export const MODELS_SCHEMA_URL = "https://pi.dev/schemas/models.schema.json";
+
+/**
+ * Маркер редактора: pi 1.2.0 опубликовал схемы конфигов, и `$schema` в
+ * `models.json` даёт валидацию и автодополнение в редакторе. Добавляет ключ
+ * только если его нет — чужое значение не трогаем. В леджер владения НЕ
+ * попадает и rollback не удаляет: это свойство файла, а не модельная запись
+ * (удаление чужого файлового свойства было бы вне нашей модели владения).
+ */
+export function withModelsSchema(json: ModelsJson): ModelsJson {
+  if (typeof json.$schema === "string") return json;
+  // `$schema` не строка — ключ сломан; выкидываем значение и пишем каноническое
+  // (деструктуризация, иначе спред перезапишет маркер сломанным значением).
+  const { $schema: _ignored, ...rest } = json;
+  return { $schema: MODELS_SCHEMA_URL, ...rest };
 }
 
 export interface Conflict {

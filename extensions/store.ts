@@ -23,9 +23,11 @@ import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   applyOverrides,
+  deepEqual,
   mergeModelsJson,
   rollbackOverrides,
   validateOverrides,
+  withModelsSchema,
   type Conflict,
   type MergeSummary,
   type ModelsJson,
@@ -166,12 +168,16 @@ export function applyFiles(overwrite: boolean, paths: StorePaths = storePaths())
   const ledger = loadState(paths);
 
   const outcome = applyOverrides(target, desired, ledger, overwrite);
-  if (outcome.changed) {
+  // `$schema` опубликованных pi 1.2.0 схем — свойство файла, а не запись
+  // оверрайда, поэтому оно добавляется на файловом слое, вне леджера.
+  const merged = withModelsSchema(outcome.merged);
+  const changed = !deepEqual(merged, target);
+  if (changed) {
     backupModelsJson(paths);
-    writeJson(paths.modelsJson, outcome.merged);
+    writeJson(paths.modelsJson, merged);
   }
   writeJson(paths.stateFile, { ...outcome.state, enabled: true });
-  return { changed: outcome.changed, conflicts: outcome.conflicts, summary: outcome.summary, pruned: outcome.pruned };
+  return { changed, conflicts: outcome.conflicts, summary: outcome.summary, pruned: outcome.pruned };
 }
 
 export interface RollbackFilesResult {

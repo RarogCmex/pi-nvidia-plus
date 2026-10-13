@@ -40,7 +40,7 @@ cd pi-nvidia-plus
 node scripts/link-pi.mjs   # only for dev (tests / typecheck)
 ```
 
-The extension self-applies its model overrides on first session start (into `~/.pi/agent/models.json`, ledger in `~/.pi/agent/nvidia-plus-models.json`). It never overwrites your manual edits without `force`.
+The extension self-applies its model overrides on first session start (into `~/.pi/agent/models.json`, ledger in `~/.pi/agent/nvidia-plus-models.json`). It never overwrites your manual edits without `force`. The written `models.json` carries pi's published `$schema` marker (`https://pi.dev/schemas/models.schema.json`, pi ≥ 1.2.0) so your editor validates the file — a file-level property, not an owned entry: added only when absent, never removed by `rollback`.
 
 Every `~/.pi/agent/…` path in this README means **pi's agent dir**, resolved with pi's own `getAgentDir()`: `$PI_CODING_AGENT_DIR` when set, `~/.pi/agent` otherwise (a rebranded pi distribution changes the default too). The extension reads and writes only that directory — it does not hardcode your home directory, so it works under an alternate config dir and never touches the default one behind your back.
 

@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { MODELS_SCHEMA_URL } from "../extensions/merge-models.ts";
 import {
   agentFile,
   applyFiles,
@@ -109,6 +110,35 @@ assert.ok(defaults.modelsJson.endsWith(join(".pi", "agent", "models.json")), "д
   const second = applyFiles(false, p);
   assert.equal(second.changed, false, "повторное применение меняет файлы");
   assert.equal(second.conflicts.length, 0);
+}
+
+// 2a. Применение ставит `$schema` опубликованных схем pi 1.2.0 в созданный
+// models.json; чужое значение не перезаписывается; rollback маркер НЕ снимает
+// (свойство файла, а не модельная запись — вне леджера владения).
+{
+  const fresh = freshDir("schema-marker");
+  const overridesFile = join(fresh, "overrides.json");
+  writeOverrides(overridesFile);
+  const p = storePaths(fresh, overridesFile);
+
+  const first = applyFiles(false, p);
+  assert.ok(first.changed);
+  assert.equal(readModels(p).$schema, MODELS_SCHEMA_URL, "$schema не записан в новый models.json");
+  assert.equal(applyFiles(false, p).changed, false, "повторное применение меняет файлы (неидемпотентно)");
+  assert.ok(!("$schema" in (loadState(p) ?? {})), "маркер попал в леджер владения");
+
+  // Чужое значение сохраняется.
+  const foreign = freshDir("schema-marker-foreign");
+  writeOverrides(join(foreign, "overrides.json"));
+  const pf = storePaths(foreign, join(foreign, "overrides.json"));
+  writeFileSync(pf.modelsJson, JSON.stringify({ $schema: "./custom.schema.json" }), "utf8");
+  applyFiles(false, pf);
+  assert.equal(readModels(pf).$schema, "./custom.schema.json", "чужое $schema перезаписано");
+
+  // Rollback убирает наши записи провайдера, но файловый маркер оставляет.
+  rollbackFiles(p);
+  assert.equal(readModels(p).$schema, MODELS_SCHEMA_URL, "rollback снял файловый $schema");
+  assert.equal(Object.keys(readModels(p).providers ?? {}).length, 0, "rollback не убрал наши записи");
 }
 
 // 2b. Курированное важнее найденного: discovered-запись `{id}` НЕ затирает
