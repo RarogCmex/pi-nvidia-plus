@@ -378,13 +378,19 @@ pi 1.0.0 (2026-10-03: same bundled undici 8.10.2 and `@types/node` 22.19.19) and
 pi 1.0.4 (2026-10-06): bundled undici is still 8.10.2, but `@types/node` moved to
 **26.6.4**, whose `assert.ok` no longer accepts `string | undefined` as the message
 (overload 1 takes `Error`/function, overload 2 a required `string`) — one test line
-needed `?? ""` to typecheck again (0.3.1). With that, typecheck (tsc 5.9.3 and
-7.1.0-dev) plus all 21 test files are green, Node 26.10. Loading on 1.0.0 and 1.0.4
-was checked in an isolated `PI_CODING_AGENT_DIR`: `models.json` (10 overrides) and
-`nvidia-plus-models.json` appear there and `--list-models nvidia` prints exactly the
-built-in catalog with and without the extension (19=19 on 1.0.0; 21=21 on 1.0.4 —
-pi's own nvidia catalog grew between those hosts; this extension is hook-only, so
-the list is not the signal).
+needed `?? ""` to typecheck again (0.3.1), and re-verified on **pi 1.2.0**
+(2026-10-12): bundled undici is still 8.10.2, `@types/node` is now **26.6.5**, and
+`engines.node` is unchanged (`>=22.19.0`). The 1.2.0 breaking changes do not touch
+this extension: `before_agent_start`/session-busy semantics are not hooked here,
+and the newly published `models.json` schema covers every field this extension
+writes (`modelOverrides` with `reasoning`, `thinkingLevelMap`, `contextWindow`,
+`compat` are all native schema fields). With that, typecheck (tsc 5.9.3 and
+7.1.0-dev) plus all 26 test files are green, Node 26.10. Loading on 1.0.0, 1.0.4
+and 1.2.0 was checked in an isolated `PI_CODING_AGENT_DIR`: `models.json` (10
+overrides) and `nvidia-plus-models.json` appear there and `--list-models nvidia`
+prints exactly the built-in catalog with and without the extension (19=19 on
+1.0.0; 21=21 on 1.0.4 — pi's own nvidia catalog grew between those hosts; this
+extension is hook-only, so the list is not the signal).
 
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
 devDependency (`link-pi.mjs` links pi's packages and undici), so TypeScript must
