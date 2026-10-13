@@ -43,7 +43,8 @@
     "proxies:prune": "node scripts/proxy-pool-audit.mjs prune",
     "proxies:normalize": "node scripts/proxy-pool-audit.mjs normalize",
     "keys:auth-check": "node scripts/keys-audit.mjs",
-    "keys:cleanup-dead": "node scripts/keys-audit.mjs --write"
+    "keys:cleanup-dead": "node scripts/keys-audit.mjs --write",
+    "probe:catalog": "node scripts/probe-catalog-fields.mjs"
   },
   "pi": {
     "extensions": [

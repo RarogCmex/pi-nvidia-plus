@@ -35,7 +35,7 @@ export const DEAD_MODELS: Record<string, string> = {
   "nvidia/nemotron-nano-12b-v2-vl": "410 EOL 2026-08-26",
   "nvidia/nvidia-nemotron-nano-9b-v2": "410 EOL 2026-08-26",
   "thinkingmachines/inkling": "410 EOL 2026-08-25",
-  "deepseek-ai/deepseek-v4-flash-0731": "end of life after 2026-09-21, announced by NVIDIA (chat probes hung on 2026-09-18)",
+  "deepseek-ai/deepseek-v4-flash-0731": "410 EOL 2026-09-21",
   "deepseek-ai/deepseek-v4-pro-0813": "410 EOL 2026-09-14",
   "minimaxai/minimax-m3": "410 EOL 2026-09-09",
   // meta/muse-glimmer-30b воскресла: 200 на трёх пробах подряд 2026-10-12

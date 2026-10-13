@@ -63,6 +63,7 @@ const ALLOWED_KEYS = new Set([
   "contextWindow",
   "maxTokens",
   "samplingParams",
+  "samplingParamsByThinkingLevel",
   "headers",
   "compat",
 ]);

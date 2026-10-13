@@ -91,6 +91,16 @@ corrected `contextWindow` (live-probe evidence, [research 10](research/10-nim-ro
 | `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
 | `deepseek-ai/deepseek-v4-flash-0731` | `supportsReasoningEffort: true` — **id is EOL on NIM**, the override is kept for the ids that still answer |
 
+Three Nemotron ids additionally carry **vendor-recommended sampling**
+(`samplingParams`, pi ≥ 1.0.2): `nemotron-3-super-120b-a12b` and
+`nemotron-3.5-lightning-30b-a3b` get `temperature: 1.0, top_p: 0.95` (their
+cards say these hold for reasoning, tool calling, and chat alike), while
+`nemotron-3-nano-omni-30b-a3b-reasoning` gets `{0.6, 0.95}` and — via
+`samplingParamsByThinkingLevel` — `{temperature: 0.2, top_k: 1}` at level
+`off`, mirroring its card's thinking-vs-instruct split. Server acceptance was
+probed live (including `top_k`); evidence in
+[research 11](research/11-pi-1.2-catalog-fields-probes.md) §1.
+
 A full model card ships as a `models` entry for **`deepseek-ai/deepseek-v4.1-flash`**
 (1M context, 384k max output, text+image input, `supportsReasoningEffort`). A
 bare `{"id": …}` entry in `models.json` would otherwise **replace** the built-in

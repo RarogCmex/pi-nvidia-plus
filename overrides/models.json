@@ -6,6 +6,7 @@
         "nvidia/nemotron-3-super-120b-a12b": {
           "reasoning": true,
           "contextWindow": 1000000,
+          "samplingParams": { "temperature": 1.0, "top_p": 0.95 },
           "thinkingLevelMap": {
             "off": "off",
             "minimal": "low",
@@ -30,6 +31,10 @@
         },
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
           "reasoning": true,
+          "samplingParams": { "temperature": 0.6, "top_p": 0.95 },
+          "samplingParamsByThinkingLevel": {
+            "off": { "temperature": 0.2, "top_k": 1 }
+          },
           "thinkingLevelMap": {
             "off": "off",
             "minimal": "low",
@@ -43,6 +48,7 @@
         "nvidia/nemotron-3.5-lightning-30b-a3b": {
           "reasoning": true,
           "contextWindow": 1000000,
+          "samplingParams": { "temperature": 1.0, "top_p": 0.95 },
           "thinkingLevelMap": {
             "off": "off",
             "minimal": "low",
