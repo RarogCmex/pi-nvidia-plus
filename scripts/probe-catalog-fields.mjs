@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 /**
- * Живые пробы для research/11 (пункты §1 и §2): сверка официальных sampling-
- * рекомендаций и поиск потолка `max_tokens` через 400-оракул шлюза NIM.
+ * Живые пробы для research/11 (пункты §1 и §2; §6 — план, свидетельств пока
+ * нет): сверка официальных sampling-рекомендаций и поиск потолка `max_tokens`
+ * через 400-оракул шлюза NIM.
  *
  * Экономика: каждый запрос — тривиальный промпт + маленький бюджет генерации;
  * на модель — несколько вызовов. Ключ НЕ печатается (только маска).
  *
  * Использование:
- *   node scripts/probe-catalog-fields.mjs [--keys FILE] [--only sampling|maxtokens]
+ *   node scripts/probe-catalog-fields.mjs [--keys FILE] [--only sampling|maxtokens|thinking]
+ *   [--models id1,id2] [--proxy-tries N]
  * Дефолт файла ключей: ~/.pi/agent/nvidia-keys.json (или $PI_CODING_AGENT_DIR).
  */
 import { readFileSync } from "node:fs";
@@ -128,6 +130,10 @@ const samplingProbes = [
     model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     body: { temperature: 0.2, top_k: 1, max_tokens: 128, chat_template_kwargs: { enable_thinking: false } },
   },
+  // Карточки новых моделей (2026-10-17): super-vl — текст 1.0/0.95;
+  // step-5-preview — 1.0/0.95 + top_k=0 (рекомендация билдера StepFun).
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { temperature: 1.0, top_p: 0.95, max_tokens: 512 } },
+  { model: "stepfun-ai/step-5-preview", body: { temperature: 1.0, top_p: 0.95, top_k: 0, max_tokens: 512 } },
 ];
 
 // ── §2: потолок max_tokens (текст 400-оракула) ─────────────────────────────
@@ -139,6 +145,28 @@ const maxTokensModels = [
   "deepseek-ai/deepseek-v4-flash-0731",
   "deepseek-ai/deepseek-v4.1-flash",
   "moonshotai/kimi-k3",
+  "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  "stepfun-ai/step-5-preview",
+];
+
+// ── §6: управление мышлением новых моделей (карточные механизмы) ───────────
+// Номер — следующий свободный пункт research/11 (§3 там занят решением по
+// `inputLimits`/vision): это план, прогон не сделан, свидетельств нет.
+// super-vl: chat_template_kwargs.enable_thinking (True/False по карточке);
+// средний уровень — medium_effort=True (HF-карточка: "off, on (medium), and on").
+// step-5: reasoning_effort low/medium/high (всегда думает, off не предусмотрен);
+// неизвестные значения — отдельные пробы, чтобы отличить 400 от тихого
+// сброса на дефолт.
+const thinkingProbes = [
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 64 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { chat_template_kwargs: { enable_thinking: true }, max_tokens: 64 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { chat_template_kwargs: { enable_thinking: true, medium_effort: true }, max_tokens: 64 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { chat_template_kwargs: { enable_thinking: true, low_effort: true }, max_tokens: 64 } },
+  { model: "stepfun-ai/step-5-preview", body: { reasoning_effort: "low", max_tokens: 64 } },
+  { model: "stepfun-ai/step-5-preview", body: { reasoning_effort: "medium", max_tokens: 64 } },
+  { model: "stepfun-ai/step-5-preview", body: { reasoning_effort: "high", max_tokens: 64 } },
+  { model: "stepfun-ai/step-5-preview", body: { reasoning_effort: "none", max_tokens: 64 } },
+  { model: "stepfun-ai/step-5-preview", body: { reasoning_effort: "minimal", max_tokens: 64 } },
 ];
 // Потолок читаем из текста 400 («Max tokens must not exceed N»): одна
 // заведомо-большая проба + подтверждение ровно N (2 запроса на модель).
@@ -209,6 +237,18 @@ async function runMaxTokens() {
   }
 }
 
-if (ONLY !== "maxtokens") await runSampling();
-if (ONLY !== "sampling") await runMaxTokens();
+async function runThinking() {
+  console.log("\n══ §6 управление мышлением (новые модели) ══");
+  for (const p of thinkingProbes) {
+    if (!WANT(p.model)) continue;
+    const r = await chat({ model: p.model, messages: PROMPT, stream: false, ...p.body });
+    const { max_tokens: _drop, ...shown } = p.body; // max_tokens — только бюджет, не предмет пробы
+    console.log(`${p.model}  ${JSON.stringify(shown)}`);
+    console.log(`  → ${r.status} ${r.ms}ms finish=${r.finish} usage=${r.usage ?? "-"}\n    ${r.preview ?? ""}`);
+  }
+}
+
+if (ONLY !== "maxtokens" && ONLY !== "thinking") await runSampling();
+if (ONLY !== "sampling" && ONLY !== "thinking") await runMaxTokens();
+if (ONLY !== "maxtokens" && ONLY !== "sampling") await runThinking();
 console.log("\nГотово. Свидетельства оформляются в research/11 — значения в overrides только из этого прогона + карточки NIM.");
