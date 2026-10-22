@@ -24,13 +24,12 @@ import { join } from "node:path";
 const OVERRIDES_PATH = join("overrides", "models.json");
 const raw = readFileSync(OVERRIDES_PATH, "utf8");
 const parsed = JSON.parse(raw) as {
-  providers?: Record<string, { modelOverrides?: Record<string, unknown> }>;
+  providers?: Record<string, { modelOverrides?: Record<string, unknown>; models?: Array<{ id?: string }> }>;
 };
 
 // ── 1. Файл — валидный models.json по схеме установленной pi ─────────────────
-const piRequire = createRequire(
-  join(realpathSync(join("node_modules", "@earendil-works", "pi-coding-agent")), "index.js"),
-);
+const piRoot = realpathSync(join("node_modules", "@earendil-works", "pi-coding-agent"));
+const piRequire = createRequire(join(piRoot, "index.js"));
 const { ModelConfig } = piRequire("./dist/core/model-config.js") as {
   ModelConfig: { load(path: string): Promise<{ providers: Map<string, any>; error?: unknown }> };
 };
@@ -50,6 +49,30 @@ assert.deepEqual([...loaded.providers.keys()], ["nvidia"], "оверрайды �
 const nvidia = loaded.providers.get("nvidia");
 const overrides = (nvidia?.modelOverrides ?? {}) as Record<string, Record<string, unknown>>;
 assert.ok(Object.keys(overrides).length >= 8, "оверрайдов подозрительно мало — файл повреждён?");
+
+// ── 1b. Своих карточек в `models` нет: они затеняют встроенные карточки pi ───
+// pi применяет запись `models` ЗАМЕНОЙ, а не патчем (`applyModelsJson`:
+// `models[existingIndex] = modelFromJson(…)`), поэтому своя карточка для id,
+// который встроенный каталог уже несёт, молча роняет всё, чего в ней нет:
+// пер-модельные `headers` (`NVCF-POLL-SECONDS: 3600` — без него NVCF отвечает
+// 202 вместо генерации), `thinkingLevelMap`, `inputLimits`. Так было с kimi-k3
+// (pi вернул карточку в базу — запись убрали) и с `deepseek-ai/deepseek-v4.1-flash`
+// на pi ≥ 1.3.0, где встроенная карточка стала полнее нашей «полной карточки 1M».
+// Правка отдельных полей — через `modelOverrides`: он мержится поключно
+// (`applyModelOverride`, compat — через `mergeCompat`).
+const piAiRequire = createRequire(join(piRoot, "node_modules", "@earendil-works", "pi-ai", "index.js"));
+const { nvidiaProvider } = piAiRequire("./dist/providers/nvidia.js") as {
+  nvidiaProvider: () => { getModels(): Array<{ id: string }> };
+};
+const builtinIds = new Set(nvidiaProvider().getModels().map((model) => model.id));
+const shadowed = (parsed.providers?.nvidia?.models ?? [])
+  .map((card) => card?.id)
+  .filter((id): id is string => typeof id === "string" && builtinIds.has(id));
+assert.deepEqual(
+  shadowed,
+  [],
+  "запись в models заменяет встроенную карточку pi целиком (теряются headers/thinkingLevelMap) — перенесите правку полей в modelOverrides",
+);
 
 // ── 2. Каждый оверрайд — только метаданные, никаких сюрпризов ────────────────
 const ALLOWED_KEYS = new Set([
@@ -147,6 +170,20 @@ for (const [level, value] of Object.entries(kimiMap)) {
     `kimi-k3: уровень ${level} → «${String(value)}» не является валидным вариантом NIM (none…max)`,
   );
 }
+
+// ── 3c. deepseek-v4.1-flash: нативное усилие поверх встроенной карточки pi ───
+// Встроенная карточка (pi ≥ 1.3.0) несёт 1M/384k, `thinkingFormat: "deepseek"`
+// и карту {high→"high", max→"max"}, но `supportsReasoningEffort: false` — без
+// флага пи не шлёт `reasoning_effort` вовсе, и хук семейства подставляет свой
+// дефолт "high" на любом уровне (пробы семейства 2026-08-28: усилие low/high/max
+// доходит и растит reasoning_content).
+const dsv41 = overrides["deepseek-ai/deepseek-v4.1-flash"];
+assert.ok(dsv41, "оверрайд deepseek-ai/deepseek-v4.1-flash пропал");
+assert.equal(
+  (dsv41.compat as Record<string, unknown> | undefined)?.supportsReasoningEffort,
+  true,
+  "v4.1-flash без supportsReasoningEffort:true — пи не шлёт reasoning_effort, и хук подставляет дефолт вместо уровня",
+);
 
 rmSync(dir, { recursive: true, force: true });
 

@@ -82,6 +82,9 @@
         "deepseek-ai/deepseek-v4-flash-0731": {
           "compat": { "supportsReasoningEffort": true }
         },
+        "deepseek-ai/deepseek-v4.1-flash": {
+          "compat": { "supportsReasoningEffort": true }
+        },
         "moonshotai/kimi-k3": {
           "reasoning": true,
           "compat": { "supportsReasoningEffort": true },
@@ -119,21 +122,7 @@
             "max": "on"
           }
         }
-      },
-      "models": [
-        {
-          "id": "deepseek-ai/deepseek-v4.1-flash",
-          "name": "DeepSeek V4.1 Flash",
-          "api": "openai-completions",
-          "baseUrl": "https://integrate.api.nvidia.com/v1",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-          "compat": { "supportsReasoningEffort": true },
-          "contextWindow": 1000000,
-          "maxTokens": 384000
-        }
-      ]
+      }
     }
   }
 }
