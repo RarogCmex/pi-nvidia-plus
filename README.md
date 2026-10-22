@@ -74,10 +74,11 @@ catalog stays authoritative. Two things are layered on top:
 
 **1. Metadata overrides** (`overrides/models.json`, applied to
 `~/.pi/agent/models.json` by `/nvidia-plus apply`, automatically on session
-start). Ten ids carry `reasoning: true` plus a `thinkingLevelMap`, which is what
-makes pi's `--thinking <level>` selector reachable for them at all. Where the
-live card disagrees with pi's generated catalog, the override also carries the
-corrected `contextWindow` (live-probe evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2):
+start). Eleven ids carry an override; eight of those add `reasoning: true` plus
+a `thinkingLevelMap`, which is what makes pi's `--thinking <level>` selector
+reachable for them at all. Where the live card disagrees with pi's generated
+catalog, the override also carries the corrected `contextWindow` (live-probe
+evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2):
 
 | id | pi level → injected |
 |---|---|
@@ -90,6 +91,7 @@ corrected `contextWindow` (live-probe evidence, [research 10](research/10-nim-ro
 | `openai/gpt-oss-20b` | native `reasoning_effort`: `off`→omitted · `minimal`→low · `xhigh`/`max`→high |
 | `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
 | `deepseek-ai/deepseek-v4-flash-0731` | `supportsReasoningEffort: true` — **id is EOL on NIM**, the override is kept for the ids that still answer |
+| `deepseek-ai/deepseek-v4.1-flash` | `supportsReasoningEffort: true` — the one field pi's own card (1.3.0+) lacks; the levels come from pi's map (`high`/`max`), and the family hook below moves the effort into `chat_template_kwargs` |
 
 Three Nemotron ids additionally carry **vendor-recommended sampling**
 (`samplingParams`, pi ≥ 1.0.2): `nemotron-3-super-120b-a12b` and
@@ -101,12 +103,31 @@ cards say these hold for reasoning, tool calling, and chat alike), while
 probed live (including `top_k`); evidence in
 [research 11](research/11-pi-1.2-catalog-fields-probes.md) §1.
 
-A full model card ships as a `models` entry for **`deepseek-ai/deepseek-v4.1-flash`**
-(1M context, 384k max output, text+image input, `supportsReasoningEffort`). A
-bare `{"id": …}` entry in `models.json` would otherwise **replace** the built-in
-card with defaults (128k context, `reasoning: false`) — pi merges `models`
-entries by replacement, not by patch, so the full card is the only safe form.
-Thinking for the `deepseek-ai/deepseek-v4*` family is request-level (see below).
+**No card of our own for `deepseek-ai/deepseek-v4.1-flash`.** pi's catalog now
+ships a full card for that id (checked in the pi 1.3.0 and 1.4.0 catalogs: 1M
+context, 384k max output, text+image, `thinkingFormat: "deepseek"`,
+`NVCF-POLL-SECONDS: 3600`, `thinkingLevelMap` with `high`/`max`), so this
+extension no longer ships one. A `models` entry **replaces** the built-in card
+instead of patching it, and ours — written 2026-10-12, when the 1M context was
+our own probe's claim and the id had no card here to lose — had become poorer
+than pi's: it dropped the NVCF long-poll header (without it NVCF answers `202`
+instead of generating) and the level map, and it offered `minimal`/`low`/
+`medium`, which pi's map deliberately nulls. The one field pi's card lacks
+stays, as a `modelOverrides` entry (those pi merges key by key, `compat`
+included): `supportsReasoningEffort: true` — without it pi sends no
+`reasoning_effort` at all and the family hook below falls back to `"high"` at
+every level. `test/overrides-schema.test.ts` reddens if a `models` entry ever
+shadows a built-in card again. Thinking for the `deepseek-ai/deepseek-v4*`
+family is request-level (see below).
+
+Upgrading prunes the card this extension used to write: an entry that is in the
+ownership ledger but no longer desired is removed from your `models.json` on the
+next apply (backup written alongside), unless you edited it. The one case that
+needs a hand is `nvidia-plus-discovered.json`: an older `/nvidia-plus discover`
+put a bare `{"id": "deepseek-ai/deepseek-v4.1-flash"}` there (it added every
+live id pi's catalog lacked), and a discovered entry is desired state, so it
+keeps shadowing pi's card. Re-run `discover` — it rewrites the file against the
+current catalog — and the next apply prunes the bare card.
 
 **2. Per-request injection** (`extensions/transform.ts`), which covers families
 rather than individual ids — so a model pi has never seen still gets the right
@@ -114,7 +135,7 @@ wire parameters if its id matches a family prefix:
 
 | family (id prefix) | injected | verified |
 |---|---|---|
-| `nvidia/nemotron-3*`, `nvidia/nemotron-3.5*` | `chat_template_kwargs.enable_thinking`, `low_effort` at `minimal`/`low` | live probes |
+| `nvidia/nemotron-3*`, `nvidia/nemotron-3.5*` — **verified ids only**, not a prefix match (`NEMOTRON_THINKING_MODELS` in `transform.ts`) | `chat_template_kwargs.enable_thinking`, `low_effort` at `minimal`/`low` | live probes |
 | `z-ai/glm*` | `enable_thinking` + `clear_thinking`, `reasoning_effort` (`high`/`max`) | **hypothesis** — extrapolated from the family, not probed per id |
 | `deepseek-ai/deepseek-v4*` | `chat_template_kwargs.thinking` + `reasoning_effort` | probed 2026-08-28 on `-pro-0813`; family EOL except the new `-v4.1-flash` |
 | `minimaxai/minimax-m3` | `thinking_mode: disabled \| adaptive \| enabled` | id returns 410 |
@@ -263,6 +284,21 @@ mechanics — is written up in [`research/`](research/); start at
   `overrides/models.json` still gets request-level injection if its family
   matches, but pi's UI will not offer a thinking selector for it until the
   override adds `reasoning: true` + `thinkingLevelMap`.
+- **pi 1.4.0's default NVIDIA model is not covered yet.**
+  `nvidia/nemotron-3.5-super-vl-120b-a12b` is in neither
+  `NEMOTRON_THINKING_MODELS` nor `overrides/models.json`, so nothing this
+  extension injects reaches it — and pi's own card asks for no thinking
+  parameter either (`supportsReasoningEffort: false`, no `thinkingLevelMap`,
+  `thinkingFormat` not one of the wired ones), so the request goes out without
+  one at every level while the selector still offers `off`…`high`. Adding a
+  mapping needs a live probe: the vendor card suggests
+  `chat_template_kwargs.enable_thinking` with a `medium_effort` middle level,
+  which is exactly what a 400-or-silent-default probe has to settle. The probes
+  are staged in `scripts/probe-catalog-fields.mjs` (§1 sampling, §2 the
+  `max_tokens` ceiling, §6 thinking — the next free section of research 11,
+  whose §3 is the vision decision) together with the other new id,
+  `stepfun-ai/step-5-preview`; running them spends key quota, so they wait for
+  an explicit request.
 - **Side files in pi's agent dir** (`~/.pi/agent/` by default, `$PI_CODING_AGENT_DIR`
   when set). `nvidia-plus-models.json` (the ownership
   ledger), `nvidia-plus-discovered.json` (discover results),
@@ -355,7 +391,7 @@ It starts a real `pi --list-models nvidia` twice — without the extension
 (the control: it proves `models.json` is ours, not pi's) and with it — then
 asserts on what landed on disk: the ownership ledger must exist with
 `enabled: true`, the number of applied overrides must equal the number in
-`overrides/models.json` (today 10; the assertion reads the file rather than
+`overrides/models.json` (today 11; the assertion reads the file rather than
 hardcoding the count), and `$HOME/.pi/agent` must be unchanged, file by file,
 name+size+mtime. The script refuses to start if `PI_CODING_AGENT_DIR` is unset
 or overlaps the real agent dir, so it cannot be pointed at a live config by
@@ -369,6 +405,16 @@ touched. Putting that hardcode back reddens 3 of the 4 assertions (measured
 2026-10-01). The runs use `--offline` because applying overrides needs no
 network: the `--list-models` output and the set of written files are
 byte-identical with and without the flag.
+
+Run it from a shell that is **not** inside a live pi session sharing
+`~/.pi/agent`: assertion 4 snapshots the default dir name+size+mtime, and a pi
+running beside it writes its own session transcripts there. Measured twice
+2026-10-22 on pi 1.4.0 — assertions 1–3 green both times (11 overrides applied),
+assertion 4 listed 7 and then 8 changed files, all of them session transcripts
+and cache files (`alibaba-cache.jsonl`, a frecency `data.mdb`), with
+`models.json` and the ledger absent from the list (the ledger's own mtime moved
+on a ~100 s cadence while nothing but `sleep` ran, which is the live session,
+not this script).
 
 Tests and typecheck need pi's own types, which are not dependencies of this
 package (pi aliases them at load time). Link your global pi install once:
@@ -394,12 +440,36 @@ needed `?? ""` to typecheck again (0.3.1), and re-verified on **pi 1.2.0**
 this extension: `before_agent_start`/session-busy semantics are not hooked here,
 and the newly published `models.json` schema covers every field this extension
 writes (`modelOverrides` with `reasoning`, `thinkingLevelMap`, `contextWindow`,
-`compat` are all native schema fields). With that, typecheck (tsc 5.9.3 and
-7.1.0-dev) plus all 26 test files are green, Node 26.10. Loading on 1.0.0, 1.0.4
-and 1.2.0 was checked in an isolated `PI_CODING_AGENT_DIR`: `models.json` (10
-overrides) and `nvidia-plus-models.json` appear there and `--list-models nvidia`
-prints exactly the built-in catalog with and without the extension (19=19 on
-1.0.0; 21=21 on 1.0.4 — pi's own nvidia catalog grew between those hosts; this
+`compat` are all native schema fields) — and on **pi 1.3.0 / 1.4.0**
+(2026-10-22): bundled undici is still 8.10.2, `@types/node` is still **26.6.5**,
+`engines.node` is unchanged. Neither release touches a hook this extension uses:
+it hooks `session_start`, `model_select`, `thinking_level_select`,
+`before_provider_request` (payload only), `after_provider_response` and
+`message_end`, and never `before_agent_start` (1.2.0's union) nor
+`before_provider_headers` — which is where 1.4.0 moved the NIM attribution
+headers, into pi-ai's client identity: nothing here reads or rewrites request
+headers, so the move is invisible from this side (and the `null`-removes-a-header
+escape hatch was never used). 1.3.0's `kimi-coding` base-URL rule is another
+provider, and dropping a previous model's thinking blocks is host-side. Two
+published facts were re-read from the 1.4.0 host rather than assumed: the
+`$schema` this extension writes is still the published schema's own `$id`
+(`https://pi.dev/schemas/models.schema.json`), and `samplingParamsByThinkingLevel`
+still resolves as `clamp → {…samplingParams, …byLevel[level], …request}`
+(`resolveSamplingParams`), so the vendored Nemotron sampling values mean what they
+meant on 1.2.0. What did change is the pinned catalog — 21 ids on 1.4.0, and it
+now carries a full card for `deepseek-ai/deepseek-v4.1-flash`, which turned our
+own `models` entry into a downgrade (see [Models](#models)); it also gained
+`nvidia/nemotron-3.5-super-vl-120b-a12b` (1.4.0's default NVIDIA model) and
+`stepfun-ai/step-5-preview`, and lost `nvidia/nemotron-3-super-120b-a12b` and
+`moonshotai/kimi-k3`, whose overrides stay in the file and apply again as soon as
+`/nvidia-plus discover` re-adds a live card. With that, typecheck (tsc 7.1.0-dev
+locally; CI pins 5.9.3) plus all 26 test files are green, Node 26.10. Loading on
+1.0.0, 1.0.4, 1.2.0 and 1.4.0 was checked in an isolated `PI_CODING_AGENT_DIR`:
+`models.json` (11 overrides) and `nvidia-plus-models.json` appear there and
+`--list-models nvidia` prints the built-in catalog with and without the extension
+(19=19 on 1.0.0; 21=21 on 1.0.4; 21=21 on 1.4.0, where the two lists differ in
+exactly one cell — `nemotron-3.5-lightning-30b-a3b`'s context, 262.1K built-in vs
+1M from our override; pi's own nvidia catalog grew between those hosts, and this
 extension is hook-only, so the list is not the signal).
 
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
