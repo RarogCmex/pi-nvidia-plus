@@ -24,7 +24,7 @@ import { join } from "node:path";
 const OVERRIDES_PATH = join("overrides", "models.json");
 const raw = readFileSync(OVERRIDES_PATH, "utf8");
 const parsed = JSON.parse(raw) as {
-  providers?: Record<string, { modelOverrides?: Record<string, unknown>; models?: Array<{ id?: string }> }>;
+  providers?: Record<string, { modelOverrides?: Record<string, unknown>; models?: Array<Record<string, unknown>> }>;
 };
 
 // ── 1. Файл — валидный models.json по схеме установленной pi ─────────────────
@@ -148,26 +148,27 @@ for (const [id, entry] of Object.entries(overrides)) {
   );
 }
 
-// ── 3b. kimi-k3: нативный reasoning_effort, валидные варианты NIM ───────────
-// Живая проба 2026-10-05 (research/07): без `supportsReasoningEffort` карта
-// мышления kimi инертна — пи не шлёт ничего, модель рассуждает неограниченно и
-// виснет. NIM принимает только none/minimal/low/medium/high/xhigh/max (`off`→400),
+// ── 3b. minimax-m3.1-flash: нативный reasoning_effort, валидные варианты NIM ─
+// Живые пробы (research/07 для kimi-k3, 2026-10-05; m3.1-flash, 2026-10-23):
+// NIM принимает только none/minimal/low/medium/high/xhigh/max (`off`→400),
 // поэтому off обязан маппиться в `none`, а не в `off`/`null`/`on`.
-const kimi = overrides["moonshotai/kimi-k3"];
-assert.ok(kimi, "оверрайд moonshotai/kimi-k3 пропал");
+// (Прежний носитель паттерна moonshotai/kimi-k3 — 410 EOL 2026-10-15, оверрайд
+// убран; карта переехала в собственную карточку m3.1-flash из `models`.)
+const m31 = (parsed.providers?.nvidia?.models ?? []).find((m) => m.id === "minimaxai/minimax-m3.1-flash");
+assert.ok(m31, "карточка minimaxai/minimax-m3.1-flash пропала из models");
 assert.equal(
-  (kimi.compat as Record<string, unknown> | undefined)?.supportsReasoningEffort,
+  (m31.compat as Record<string, unknown> | undefined)?.supportsReasoningEffort,
   true,
-  "kimi-k3 без supportsReasoningEffort:true — карта мышления инертна, пи не шлёт reasoning_effort (research/07 §1)",
+  "m3.1-flash без supportsReasoningEffort:true — карта мышления инертна, пи не шлёт reasoning_effort (research/07 §1)",
 );
-const kimiMap = kimi.thinkingLevelMap as Record<string, unknown>;
-assert.ok(kimiMap, "kimi-k3: нет thinkingLevelMap");
-assert.equal(kimiMap.off, "none", 'kimi-k3: off должен быть "none" — NIM отвергает "off" (400), а null/absent виснет (research/07 §2–3)');
+const m31Map = m31.thinkingLevelMap as Record<string, unknown>;
+assert.ok(m31Map, "m3.1-flash: нет thinkingLevelMap");
+assert.equal(m31Map.off, "none", 'm3.1-flash: off должен быть "none" — NIM отвергает "off" (400)');
 const NIM_EFFORT_VARIANTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
-for (const [level, value] of Object.entries(kimiMap)) {
+for (const [level, value] of Object.entries(m31Map)) {
   assert.ok(
     typeof value === "string" && NIM_EFFORT_VARIANTS.has(value),
-    `kimi-k3: уровень ${level} → «${String(value)}» не является валидным вариантом NIM (none…max)`,
+    `m3.1-flash: уровень ${level} → «${String(value)}» не является валидным вариантом NIM (none…max)`,
   );
 }
 

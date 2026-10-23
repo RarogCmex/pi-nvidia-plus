@@ -34,6 +34,12 @@ const NEMOTRON_THINKING_MODELS = new Set([
   // не этот набор.
   "nvidia/nemotron-3-nano-30b-a3b",
   "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+  // Живая проба 2026-10-23: chat_template_kwargs.enable_thinking=false (и
+  // по умолчанию) даёт ответ без reasoning-канала, enable_thinking=true +
+  // low_effort=true — reasoning_content; top-level reasoning_effort вне
+  // чат-шаблона отвергается 400, как у всего семейства. enable_thinking=true
+  // без low_effort не пробовалась — семейная экстраполяция (гипотеза).
+  "nvidia/nemotron-3.5-bolt-e4b",
 ]);
 
 // Gemma 4 (тикет 19): в режиме мышления модель виснет — ответ не приходит
