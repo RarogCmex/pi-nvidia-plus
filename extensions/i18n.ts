@@ -354,8 +354,8 @@ export const MESSAGES = {
     ru: ", {ms} мс",
   },
   proxyPanelEdit: {
-    en: ". The extension never writes the pool file — add/remove URLs in {source}",
-    ru: ". Расширение не пишет файл пула — добавляйте/убирайте URL в {source}",
+    en: ". Edit the pool in {source} — the extension rewrites it only in proxy cleanup-dead",
+    ru: ". Пул правится в {source} — расширение переписывает его только в proxy cleanup-dead",
   },
   proxyPanelMetrics: {
     en: "; pin switches: {n}",
@@ -400,8 +400,28 @@ export const MESSAGES = {
     ru: "pi-nvidia-plus: проверяю {count} прокси-эндпоинтов (GET /v1/models через каждый, параллельность 2, таймаут 10 с, Esc отменяет остаток)…",
   },
   proxyCheckSummary: {
-    en: "pi-nvidia-plus: proxy check in {seconds} s — ok: {ok}, unreachable: {unreachable}, unknown: {unknown}{okRows}{pinNote}{abortedNote}",
-    ru: "pi-nvidia-plus: проверка прокси за {seconds} с — ok: {ok}, недоступны: {unreachable}, не определены: {unknown}{okRows}{pinNote}{abortedNote}",
+    en: "pi-nvidia-plus: proxy check in {seconds} s — ok: {ok}, unreachable: {unreachable}, unknown: {unknown}{okRows}{badRows}{pinNote}{abortedNote}",
+    ru: "pi-nvidia-plus: проверка прокси за {seconds} с — ok: {ok}, недоступны: {unreachable}, не определены: {unknown}{okRows}{badRows}{pinNote}{abortedNote}",
+  },
+  proxyCheckBadRow: {
+    en: "; {display} — {reason}",
+    ru: "; {display} — {reason}",
+  },
+  proxyCheckReasonTunnelRejected: {
+    en: "proxy refused the tunnel (407 auth wall — the exit cannot reach NIM)",
+    ru: "прокси отказал в туннеле (407 — стена авторизации, до NIM не доходит)",
+  },
+  proxyCheckReasonConnectFailed: {
+    en: "connect failed ({detail}) — the exit is unreachable",
+    ru: "соединение не установлено ({detail}) — выход недостижим",
+  },
+  proxyCheckReasonTimeout: {
+    en: "no response within the probe timeout — the exit may be slow, not necessarily dead",
+    ru: "нет ответа за таймаут пробы — выход может быть медленным, не обязательно мёртвым",
+  },
+  proxyCheckReasonUnknown: {
+    en: "unclassified failure ({detail})",
+    ru: "неклассифицированный сбой ({detail})",
   },
   proxyCheckOkRow: {
     en: "; {display} — {ms} ms",
@@ -454,6 +474,32 @@ export const MESSAGES = {
   statusProxyPoolInstalled: {
     en: "proxy ring: {rotation}, pool {source} ({count}), pin {pin} (installed)",
     ru: "кольцо прокси: {rotation}, пул {source} ({count}), pin {pin} (установлен)",
+  },
+
+  // ── Чистка мёртвых эндпоинтов: `proxy cleanup-dead` ───────────────────
+  cmdProxyCleanupDeadDesc: {
+    en: "remove proxy endpoints the reachability probe proved dead (unreachable twice in a row; timestamped backup is kept)",
+    ru: "удалить прокси-эндпоинты, доказанно мёртвые пробой достижимости (недоступны дважды подряд; резерв с датой сохраняется)",
+  },
+  proxyCleanupNoFile: {
+    en: "pi-nvidia-plus: proxy cleanup needs a FILE pool source; current source: {source}",
+    ru: "pi-nvidia-plus: чистке прокси нужен файл-источник пула; текущий источник: {source}",
+  },
+  proxyCleanupStart: {
+    en: "pi-nvidia-plus: probing {count} proxy endpoints (GET /v1/models through each; a dead verdict must repeat twice)…",
+    ru: "pi-nvidia-plus: проверяю {count} прокси-эндпоинтов (GET /v1/models через каждый; вердикт «мёртв» подтверждается повтором)…",
+  },
+  proxyCleanupNoneDead: {
+    en: "pi-nvidia-plus: no provably dead endpoints — nothing to remove",
+    ru: "pi-nvidia-plus: доказанно мёртвых эндпоинтов нет — удалять нечего",
+  },
+  proxyCleanupRefusedEmpty: {
+    en: "pi-nvidia-plus: refusing cleanup — it would empty the proxy pool entirely; edit {file} by hand",
+    ru: "pi-nvidia-plus: отказ чистки — она опустошила бы пул прокси целиком; правьте {file} вручную",
+  },
+  proxyCleanupApplied: {
+    en: "pi-nvidia-plus: removed {removed} dead endpoints ({displays}), {kept} kept; backup: {backup}",
+    ru: "pi-nvidia-plus: удалено {removed} мёртвых эндпоинтов ({displays}), осталось {kept}; резерв: {backup}",
   },
 
   // ── Диагностика 429/5xx (тикет 11) ───────────────────────────────────

@@ -34,6 +34,7 @@ import {
   parseProxiesFileContent,
   parseProxyEndpoint,
   parseRequestTimeouts,
+  planProxyCleanup,
   redactProxyCredentials,
   runProxyProbes,
   type ProxyProbeResultRow,
@@ -208,6 +209,17 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
   // живой версии: «SOCKS5 connection timeout» / «SOCKS5 authentication timeout»).
   assert.equal(classifyProxyProbe({ error: new Error("SOCKS5 connection timeout") }), "unreachable");
   assert.equal(classifyProxyProbe({ error: new Error("SOCKS5 authentication timeout") }), "unreachable");
+  // Отказ прокси в туннеле: ундичи бросает RequestAbortedError[UND_ERR_ABORTED]
+  // с текстом «Proxy response (407) !== 200 when HTTP Tunneling» — это отказ
+  // CONNECT (стена авторизации прокси), а не «неизвестно». Живой замер
+  // 2026-10-23: так отвечали 8 выходов пула из 29.
+  for (const status of [407, 502, 503]) {
+    const rejected = Object.assign(new Error(`Proxy response (${status}) !== 200 when HTTP Tunneling`), {
+      name: "AbortError",
+      code: "UND_ERR_ABORTED",
+    });
+    assert.equal(classifyProxyProbe({ error: rejected }), "unreachable", `CONNECT отклонён прокси (${status})`);
+  }
   // Вложенная причина (fetch-обёртки) тоже распознаётся.
   assert.equal(classifyProxyProbe({ error: Object.assign(new Error("fetch failed"), { cause: econn }) }), "unreachable");
   // AggregateError (happy eyeballs).
@@ -906,6 +918,47 @@ function writeProxiesFile(path: string, proxies: string[], mtimeOffsetMs = 0): v
   solo.setPool(["http://solo:9/"]);
   solo.noteRequestTimeout("m", "http://solo:9/", 0);
   assert.equal((solo.pick(1, { rotationEnabled: true, modelId: "m" }) as { href: string }).href, "http://solo:9/");
+}
+
+/* ── Чистка мёртвых эндпоинтов: planProxyCleanup ─────────────────────── */
+{
+  const env = { PROXY_URL: "http://env-user:env-pass@10.0.0.9:8888" };
+  // Совпадение по display identity — в том числе через $VAR-интерполяцию.
+  const plan = planProxyCleanup(
+    ["http://a:1", "http://user:secret@dead.example:3128", "$PROXY_URL", "not a url at all"],
+    ["dead.example:3128", "10.0.0.9:8888"],
+    env,
+  );
+  assert.deepEqual(plan.keep, ["http://a:1", "not a url at all"], "живые и несопоставимые записи остаются дословно");
+  assert.deepEqual(plan.dropped.map((d) => d.display), ["dead.example:3128", "10.0.0.9:8888"]);
+  assert.deepEqual(plan.dropped.map((d) => d.raw), ["http://user:secret@dead.example:3128", "$PROXY_URL"]);
+  assert.deepEqual(plan.unmatched, ["not a url at all"], "неразбираемая запись сохраняется — чистка удаляет только доказанное");
+  assert.equal(plan.refused, undefined);
+
+  // Полная зачистка — отказ: файл не переписывается.
+  const allDead = planProxyCleanup(["http://a:1", "http://b:2"], ["a:1", "b:2"], {});
+  assert.equal(allDead.refused, "would-empty-pool");
+  assert.deepEqual(allDead.keep, ["http://a:1", "http://b:2"]);
+  assert.deepEqual(allDead.dropped, []);
+
+  // Несовпадение display (другой порт) — запись остаётся.
+  const miss = planProxyCleanup(["http://a:1"], ["a:2"], {});
+  assert.deepEqual(miss.keep, ["http://a:1"]);
+  assert.deepEqual(miss.dropped, []);
+
+  // Неразрешимый $VAR — unmatched, но остаётся в файле.
+  const unresolved = planProxyCleanup(["$MISSING_VAR"], ["whatever:1"], {});
+  assert.deepEqual(unresolved.keep, ["$MISSING_VAR"]);
+  assert.deepEqual(unresolved.unmatched, ["$MISSING_VAR"]);
+  assert.deepEqual(unresolved.dropped, []);
+  assert.equal(unresolved.refused, undefined);
+
+  // Все записи файла мёртвые, кроме нераспознанной: живой выход не остаётся —
+  // чистка отказывается (файл не трогаем), даже если нераспознанная запись в нём есть.
+  const onlyUnmatched = planProxyCleanup(["http://a:1", "not a url"], ["a:1"], {});
+  assert.equal(onlyUnmatched.refused, "would-empty-pool");
+  assert.deepEqual(onlyUnmatched.keep, ["http://a:1", "not a url"]);
+  assert.deepEqual(onlyUnmatched.dropped, []);
 }
 
 console.log("proxy-pool: все проверки прошли");

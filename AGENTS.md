@@ -27,7 +27,8 @@
   проверяется она на месте командой `providers`.
 - `extensions/proxy.ts`, `extensions/proxy-pool.ts` — выборочный глобальный
   диспетчер (только `integrate.api.nvidia.com`), кольцо выходов, карантин,
-  пиннинг, SOCKS5.
+  пиннинг, SOCKS5; там же чистый шов чистки мёртвых выходов
+  (`planProxyCleanup` для `proxy cleanup-dead`).
 - `extensions/keys.ts` — пул ключей и ротация; `extensions/metrics.ts` —
   сессионные счётчики; `extensions/stream-errors.ts` — классификация
   оборванного SSE-потока; `extensions/degenerate.ts` — классификация

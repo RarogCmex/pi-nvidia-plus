@@ -125,8 +125,8 @@ function values(prefix: string): string[] | null {
   assert.equal(root?.find((i) => i.value === "keys ")?.label, "keys [check|auth-check|cleanup-dead|on|off]");
   assert.equal(root?.find((i) => i.value === "apply ")?.label, "apply [force]");
   const proxy = completeArgs("proxy ", nvidiaPlusCommands());
-  assert.deepEqual(proxy?.map((i) => i.value), ["proxy check", "proxy pin ", "proxy on", "proxy off"]);
-  assert.equal(root?.find((i) => i.value === "proxy ")?.label, "proxy [check|pin|on|off]");
+  assert.deepEqual(proxy?.map((i) => i.value), ["proxy check", "proxy pin ", "proxy cleanup-dead", "proxy on", "proxy off"]);
+  assert.equal(root?.find((i) => i.value === "proxy ")?.label, "proxy [check|pin|cleanup-dead|on|off]");
 
   // Третий уровень: `proxy pin ` (с пробелом) открывает динамический список id.
   setDynamicPinIds(() => [
@@ -176,7 +176,7 @@ function values(prefix: string): string[] | null {
     "rollback",
     "status",
     "keys [check|auth-check|cleanup-dead|on|off]",
-    "proxy [check|pin|on|off]",
+    "proxy [check|pin|cleanup-dead|on|off]",
     "discover",
   ]);
 
@@ -200,7 +200,7 @@ function values(prefix: string): string[] | null {
   // третий уровень — id текущего пула через редакторный перехват.
   const proxy = nvidiaPlusArgSuggestions("/nvidia-plus proxy ");
   assert.equal(proxy?.prefix, "proxy ");
-  assert.deepEqual(proxy?.items.map((i) => i.value), ["proxy check", "proxy pin ", "proxy on", "proxy off"]);
+  assert.deepEqual(proxy?.items.map((i) => i.value), ["proxy check", "proxy pin ", "proxy cleanup-dead", "proxy on", "proxy off"]);
 
   setDynamicPinIds(() => [{ id: "us.ntt:42435", description: "ready" }]);
   const pinIds = nvidiaPlusArgSuggestions("/nvidia-plus proxy pin ");

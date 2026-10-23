@@ -6,7 +6,7 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
 
 [pi](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`) is the coding agent this extension plugs into. It ships a built-in `nvidia` provider for NVIDIA NIM (`https://integrate.api.nvidia.com`); this extension hooks that provider rather than replacing it, so pi's own auth, streaming, retries and cost attribution are untouched.
 
-> ⚠️ **Two families this extension was built around are now end-of-life on NIM.** DeepSeek V4 (`deepseek-ai/deepseek-v4-flash-0731`, `-pro-0813`) was deprecated 2026-09-19 and is unsupported after 2026-09-21; MiniMax M3 (`minimaxai/minimax-m3`) returns 410. The thinking mappings for both are still shipped, but selecting either model produces a "reported dead" warning. See [Limitations](#limitations).
+> ⚠️ **Three families this extension was built around are now end-of-life on NIM.** DeepSeek V4 (`deepseek-ai/deepseek-v4-flash-0731`, `-pro-0813`) was deprecated 2026-09-19 and is unsupported after 2026-09-21; MiniMax M3 (`minimaxai/minimax-m3`) returns 410; `moonshotai/kimi-k3` returns 410 since 2026-10-15 (its override was removed, the id joined the dead-model list). Selecting any of them produces a "reported dead" warning. See [Limitations](#limitations).
 
 > 🇷🇺 Русскоязычным пользователям: все сообщения расширения двуязычны (см. `PI_NVIDIA_PLUS_LANG` ниже). Документация ниже — на английском, как принято для GitHub; вопросы можно задавать на любом языке.
 
@@ -74,7 +74,7 @@ catalog stays authoritative. Two things are layered on top:
 
 **1. Metadata overrides** (`overrides/models.json`, applied to
 `~/.pi/agent/models.json` by `/nvidia-plus apply`, automatically on session
-start). Eleven ids carry an override; eight of those add `reasoning: true` plus
+start). Nine ids carry an override; seven of those add `reasoning: true` plus
 a `thinkingLevelMap`, which is what makes pi's `--thinking <level>` selector
 reachable for them at all. Where the live card disagrees with pi's generated
 catalog, the override also carries the corrected `contextWindow` (live-probe
@@ -86,11 +86,9 @@ evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2
 | `nvidia/nemotron-3-ultra-550b-a55b` | same |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | same |
 | `nvidia/nemotron-3.5-lightning-30b-a3b` | same, plus `contextWindow` 1M (live-probe confirmed, as above) |
-| `moonshotai/kimi-k3` | native `reasoning_effort` (`supportsReasoningEffort: true`): `off`→none · `minimal`/`low`/`medium`/`high`/`xhigh`/`max`→identity. NIM accepts only `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max` — `off` is a 400, and omitting the field (the built-in default) leaves kimi reasoning unbounded, so `off` must send `none` (unlike `gpt-oss-20b`, where omitting is safe). Probed live 2026-10-05. |
 | `z-ai/glm-5.3`, `z-ai/glm-5.3-flash` | same |
 | `openai/gpt-oss-20b` | native `reasoning_effort`: `off`→omitted · `minimal`→low · `xhigh`/`max`→high |
 | `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
-| `deepseek-ai/deepseek-v4-flash-0731` | `supportsReasoningEffort: true` — **id is EOL on NIM**, the override is kept for the ids that still answer |
 | `deepseek-ai/deepseek-v4.1-flash` | `supportsReasoningEffort: true` — the one field pi's own card (1.3.0+) lacks; the levels come from pi's map (`high`/`max`), and the family hook below moves the effort into `chat_template_kwargs` |
 
 Three Nemotron ids additionally carry **vendor-recommended sampling**
@@ -102,6 +100,28 @@ cards say these hold for reasoning, tool calling, and chat alike), while
 `off`, mirroring its card's thinking-vs-instruct split. Server acceptance was
 probed live (including `top_k`); evidence in
 [research 11](research/11-pi-1.2-catalog-fields-probes.md) §1.
+
+**Two curated cards of our own** (`models` entries — these ids are live on NIM
+but absent from pi 1.4.0's built-in catalog, so without a card they are not
+selectable at all; catalog sync 2026-10-23):
+
+- `nvidia/nemotron-3.5-bolt-e4b` — Nemotron 3.5 edge model (Gemma-4-E4B base).
+  Card: text-only, 64K in / 64K out (vendor card), sampling `1.0 / 0.95`,
+  `thinkingLevelMap` like the Nemotron family. Live probes 2026-10-23:
+  `chat_template_kwargs.enable_thinking=false` (and the default) answer without
+  a reasoning channel, `enable_thinking=true, low_effort=true` produces
+  `reasoning_content`; top-level `reasoning_effort` is a 400, same as the rest
+  of the family (`enable_thinking=true` without `low_effort` — family
+  extrapolation, marked as a hypothesis in the code).
+- `minimaxai/minimax-m3.1-flash` — MiniMax M3.1 Flash (text+image, 262K
+  context, sampling `1.0 / 0.95` per the build card). Thinking is always on:
+  `chat_template_kwargs.thinking_mode` is silently ignored (probe 2026-10-23),
+  but top-level `reasoning_effort` is validated (`bogus`→400, `off`→400,
+  `low`/`high` verified to scale the reasoning channel) — so the card is
+  native-path, same shape kimi-k3 had: `supportsReasoningEffort: true` with an
+  identity map, `off`→`none`. Whether `none` fully silences the interleaved
+  thinking is not verified (rate-limited probe) — treat `off` as "least
+  reasoning", not a guaranteed off-switch.
 
 **No card of our own for `deepseek-ai/deepseek-v4.1-flash`.** pi's catalog now
 ships a full card for that id (checked in the pi 1.3.0 and 1.4.0 catalogs: 1M
@@ -139,15 +159,16 @@ wire parameters if its id matches a family prefix:
 | `z-ai/glm*` | `enable_thinking` + `clear_thinking`, `reasoning_effort` (`high`/`max`) | **hypothesis** — extrapolated from the family, not probed per id |
 | `deepseek-ai/deepseek-v4*` | `chat_template_kwargs.thinking` + `reasoning_effort` | probed 2026-08-28 on `-pro-0813`; family EOL except the new `-v4.1-flash` |
 | `minimaxai/minimax-m3` | `thinking_mode: disabled \| adaptive \| enabled` | id returns 410 |
-| `google/gemma-4*` | `enable_thinking=false` at **every** level | live probes — see Limitations |
+| `minimaxai/minimax-m3.1-flash` | native `reasoning_effort` (`off`→`none`; `off` value is a 400) | `thinking_mode` kwarg ignored — probe 2026-10-23 |
+| `google/gemma-4*` | `enable_thinking=false` at **every** level | live probes — see Limitations; `gemma-4-31b-it` also hangs with the kwarg (2026-10-23) |
 
 `/nvidia-plus status` (and the live status line) print the exact thinking
 parameter that reaches NIM for the selected model and level. For hook-driven
 families that is the injected `chat_template_kwargs`/`reasoning_effort`; for
-native-path models (`moonshotai/kimi-k3`, `openai/gpt-oss-20b`) it is the
-`reasoning_effort` pi derives from the applied `thinkingLevelMap` (e.g. kimi
-`off` → `reasoning_effort="none"`), so you can verify the requested level against
-what actually goes upstream without `PI_NVIDIA_PLUS_DEBUG=1`. `/nvidia-plus
+native-path models (`minimaxai/minimax-m3.1-flash`, `openai/gpt-oss-20b`) it is
+the `reasoning_effort` pi derives from the applied `thinkingLevelMap` (e.g.
+m3.1-flash `off` → `reasoning_effort="none"`), so you can verify the requested
+level against what actually goes upstream without `PI_NVIDIA_PLUS_DEBUG=1`. `/nvidia-plus
 discover` adds live ids that pi's catalog is missing (it never adds an id the
 dead-model list already knows about).
 
@@ -170,6 +191,7 @@ All commands live under one root to keep the command menu clean:
 | `/nvidia-plus proxy check` | Probe every exit (`GET /v1/models` through each) and pin the fastest reachable |
 | `/nvidia-plus proxy pin <host:port>` | Lock an exit for the session (no full check) |
 | `/nvidia-plus proxy on\|off` | Toggle the automatic ring pick (`off` locks the current pin) |
+| `/nvidia-plus proxy cleanup-dead` | Remove the endpoints a reachability probe proved dead from the pool file (`unreachable` twice in a row — a single CONNECT failure only quarantines; timestamped backup, mode 0600, unknown/unparsed entries untouched; refuses to empty the pool) |
 
 Tab-completion covers subcommands and their arguments (including `proxy pin <host:port>` ids from the current pool).
 
@@ -209,9 +231,9 @@ The extension only **reads** this file. Your pi API key stays first in the rotat
 { "proxies": ["http://$PROXY_USER:$PROXY_PASS@us.exit.example:10001", "http://127.0.0.1:8870"] }
 ```
 
-Exactly one source wins — `NVIDIA_NIM_PROXIES` > `NVIDIA_NIM_PROXIES_FILE` > the default file `~/.pi/agent/nvidia-proxies.json` (only if it exists) > the legacy single `NVIDIA_NIM_PROXY`. They are never merged. The extension only **reads** this file (hot-reload on `mtime`; a broken or vanished file keeps the last good pool and warns once); `chmod 600` is recommended since URLs may carry credentials.
+Exactly one source wins — `NVIDIA_NIM_PROXIES` > `NVIDIA_NIM_PROXIES_FILE` > the default file `~/.pi/agent/nvidia-proxies.json` (only if it exists) > the legacy single `NVIDIA_NIM_PROXY`. They are never merged. The extension only **reads** this file on the hot path (hot-reload on `mtime`; a broken or vanished file keeps the last good pool and warns once) — the one exception is `/nvidia-plus proxy cleanup-dead`, which rewrites the `proxies` array with a timestamped backup; `chmod 600` is recommended since URLs may carry credentials.
 
-Per request to NIM the ring picks one **pin** — a sticky exit for the whole inner key/retry circle. A dead CONNECT (including SOCKS handshake/auth failures) goes to a 60 s **quarantine** (TTL, not a permanent denylist); 429/401/403/5xx and in-band overload never rotate the proxy (those are key/transport buckets). `/nvidia-plus proxy check` measures latency on a cheap `GET /v1/models` through each exit and pins the fastest reachable one. In notifications, status, logs and the shared state file every exit appears only as its display identity `host:port` — credentials are never written.
+Per request to NIM the ring picks one **pin** — a sticky exit for the whole inner key/retry circle. A dead CONNECT (including SOCKS handshake/auth failures and a proxy that refuses the tunnel with `407`) goes to a 60 s **quarantine** (TTL, not a permanent denylist); 429/401/403/5xx and in-band overload never rotate the proxy (those are key/transport buckets). `/nvidia-plus proxy check` measures latency on a cheap `GET /v1/models` through each exit and pins the fastest reachable one. Its verdict per exit is: **ok** (any HTTP answer — the exit is reachable; auth is not the question), **unreachable** (CONNECT-class failure: refused, DNS, timeout of the handshake, or a `407` auth wall), **unknown** (the probe failed in a way that says nothing about the exit — e.g. a headers timeout while the origin was slow); every non-ok exit is listed in the summary with its reason, so the three numbers are actionable. In notifications, status, logs and the shared state file every exit appears only as its display identity `host:port` — credentials are never written.
 
 **`host:port` must be unique in the pool.** Display identity is what pinning, the shared quarantine file and the status panel key on, so two entries that differ only by credentials are the *same* exit as far as the ring is concerned: `hrefForDisplay` resolves to the first match and a display-keyed cooldown lands on both. Rotating gateways sold as several identities behind one host (for example two different accounts on `p.webshare.io:80`) therefore cannot coexist — `npm run proxies:add` reports such a candidate as a display conflict and skips it unless you pass `--replace-display` to swap the credentials of the existing entry.
 
@@ -265,19 +287,12 @@ mechanics — is written up in [`research/`](research/); start at
   2026-10-12), no amount of rotation helps; the model is simply unusable until
   NIM recovers. pi does not retry transport errors, so a timed-out request
   surfaces as an error turn — re-issue it.
-- **kimi-k3 is flaky on NIM and route-dependent.** Live probes of 2026-10-05
-  ([`research/07`](research/07-kimi-k3-thinking-probe.md)) show `moonshotai/kimi-k3`
-  takes ~2–4 min even for a one-word answer and, on a trivial prompt, returns a
-  repetition collapse (`content: null`, `reasoning_content: "The!!!…"`,
-  `finish_reason: stop`) in roughly half of completed runs — **independent of the
-  reasoning level** (`none`, `low` and the built-in default all collapse). This is
-  a model-side fault, not a mapping artifact: the extension sends the valid NIM
-  variant (`off`→`none`; `off`→`"off"` was an HTTP 400 and the built-in map was
-  inert), and the degenerate-output detector (§8 above) catches each collapse and
-  tells you to repeat the request. A working route answered in 1.1 s on
-  2026-10-12 — so before blaming the model, let the route-bypass move you to
-  another exit. No `reasoning_effort` value makes kimi-k3 reliable; if it
-  collapses, retry.
+- **kimi-k3 is EOL and was flaky before that.** `moonshotai/kimi-k3` returns
+  410 since 2026-10-15 (dead-model list; the override was removed from
+  `overrides/models.json`). The 2026-10-05 probes
+  ([`research/07`](research/07-kimi-k3-thinking-probe.md)) that drove the native
+  `reasoning_effort` mapping remain the evidence for the shared NIM effort scale
+  (`none…max`, `off`→400) now carried by `minimaxai/minimax-m3.1-flash`.
 - **Billing is out of scope.** The extension does not read, estimate or report
   NIM cost; pi's own cost accounting for the `nvidia` provider is untouched.
 - **Overrides are per-id, not per-family.** An id absent from
@@ -409,7 +424,8 @@ byte-identical with and without the flag.
 Run it from a shell that is **not** inside a live pi session sharing
 `~/.pi/agent`: assertion 4 snapshots the default dir name+size+mtime, and a pi
 running beside it writes its own session transcripts there. Measured twice
-2026-10-22 on pi 1.4.0 — assertions 1–3 green both times (11 overrides applied),
+2026-10-22 on pi 1.4.0 — assertions 1–3 green both times (11 overrides applied
+then; nine since the 2026-10-23 catalog sync),
 assertion 4 listed 7 and then 8 changed files, all of them session transcripts
 and cache files (`alibaba-cache.jsonl`, a frecency `data.mdb`), with
 `models.json` and the ledger absent from the list (the ledger's own mtime moved
@@ -460,12 +476,14 @@ meant on 1.2.0. What did change is the pinned catalog — 21 ids on 1.4.0, and i
 now carries a full card for `deepseek-ai/deepseek-v4.1-flash`, which turned our
 own `models` entry into a downgrade (see [Models](#models)); it also gained
 `nvidia/nemotron-3.5-super-vl-120b-a12b` (1.4.0's default NVIDIA model) and
-`stepfun-ai/step-5-preview`, and lost `nvidia/nemotron-3-super-120b-a12b` and
-`moonshotai/kimi-k3`, whose overrides stay in the file and apply again as soon as
-`/nvidia-plus discover` re-adds a live card. With that, typecheck (tsc 7.1.0-dev
-locally; CI pins 5.9.3) plus all 26 test files are green, Node 26.10. Loading on
+`stepfun-ai/step-5-preview`, and lost `nvidia/nemotron-3-super-120b-a12b` (still
+live on NIM — its override stays and applies again as soon as
+`/nvidia-plus discover` re-adds a live card) and `moonshotai/kimi-k3` (410 EOL
+2026-10-15 — its override was removed and the id joined the dead-model list). With that, typecheck (tsc 7.1.0-dev
+locally; CI pins 5.9.3) plus all 27 test files are green, Node 26.10. Loading on
 1.0.0, 1.0.4, 1.2.0 and 1.4.0 was checked in an isolated `PI_CODING_AGENT_DIR`:
-`models.json` (11 overrides) and `nvidia-plus-models.json` appear there and
+`models.json` (nine overrides plus two curated cards for ids outside pi's
+built-in catalog) and `nvidia-plus-models.json` appear there and
 `--list-models nvidia` prints the built-in catalog with and without the extension
 (19=19 on 1.0.0; 21=21 on 1.0.4; 21=21 on 1.4.0, where the two lists differ in
 exactly one cell — `nemotron-3.5-lightning-30b-a3b`'s context, 262.1K built-in vs

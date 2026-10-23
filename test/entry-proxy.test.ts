@@ -117,7 +117,7 @@ assert.ok(handlers["session_start"]?.length, "session_start подписан");
   assert.ok(panel.includes("pool NVIDIA_NIM_PROXIES (2)"), panel);
   assert.ok(panel.includes("127.0.0.1:1"), panel);
   assert.ok(panel.includes("127.0.0.1:2"), panel);
-  assert.ok(panel.includes("never writes the pool file"), panel);
+  assert.ok(panel.includes("rewrites it only in proxy cleanup-dead"), panel);
   assert.ok(!panel.includes("secret"), "креденшелы не в панели");
 }
 
@@ -205,10 +205,10 @@ assert.ok(handlers["session_start"]?.length, "session_start подписан");
     root.map((i) => i.value),
     ["apply ", "rollback ", "status ", "keys ", "proxy ", "discover "],
   );
-  assert.equal(root.find((i) => i.value === "proxy ")?.label, "proxy [check|pin|on|off]");
+  assert.equal(root.find((i) => i.value === "proxy ")?.label, "proxy [check|pin|cleanup-dead|on|off]");
 
   const second = completions("proxy ") as Array<{ value: string }>;
-  assert.deepEqual(second.map((i) => i.value), ["proxy check", "proxy pin ", "proxy on", "proxy off"]);
+  assert.deepEqual(second.map((i) => i.value), ["proxy check", "proxy pin ", "proxy cleanup-dead", "proxy on", "proxy off"]);
 
   const third = completions("proxy pin ") as Array<{ value: string; label: string; description: string }>;
   assert.deepEqual(third.map((i) => i.value), ["proxy pin 127.0.0.1:1", "proxy pin 127.0.0.1:2"]);

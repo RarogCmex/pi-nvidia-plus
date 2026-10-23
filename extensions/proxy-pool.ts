@@ -38,6 +38,16 @@ export const PROXY_QUARANTINE_MS = 60_000;
 export const PROXY_PROBE_TIMEOUT_MS = 10_000;
 export const PROXY_CHECK_CONCURRENCY = 2;
 
+/**
+ * Прокси отказал в установлении туннеля: ответ на CONNECT не 200. Ундичи
+ * сообщает об этом RequestAbortedError с кодом UND_ERR_ABORTED (код сам по
+ * себе не говорит о CONNECT-классе — значит, нужен текст сообщения) и
+ * сообщением вида «Proxy response (407) !== 200 when HTTP Tunneling».
+ * 407 — стена авторизации прокси, 502/503 — прокси не смог связаться с
+ * origin. Измерено 2026-10-23 на живом пуле: так отвечали 8 выходов из 29.
+ */
+const PROXY_TUNNEL_REJECTED_RE = /Proxy response \(\d{3}\) !== 200 when HTTP Tunneling/;
+
 /* ------------------------------------------------------------------ */
 /* Таймауты живого пути запроса (исследование 10, §3)                    */
 /* ------------------------------------------------------------------ */
@@ -243,6 +253,71 @@ export function parseInlineProxies(raw: string | undefined): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Чистка мёртвых эндпоинтов (чистая часть `proxy cleanup-dead`)           */
+/* ------------------------------------------------------------------ */
+
+export interface ProxyCleanupPlan {
+  /** Исходные записи, которые остаются в файле (порядок сохранён). */
+  keep: string[];
+  /** Удаляемые записи: исходная строка и display identity мёртвого выхода. */
+  dropped: Array<{ raw: string; display: string }>;
+  /**
+   * Записи, которые не удалось сопоставить с пробованными выходами
+   * (неразрешимый `$VAR`, неразбираемый эндпоинт) — сохраняются: чистка
+   * удаляет только доказанное.
+   */
+  unmatched: string[];
+  /** Отказ: чистка опустошила бы непустой пул — файл не трогаем. */
+  refused?: "would-empty-pool";
+}
+
+/**
+ * План чистки файла пула: вычеркнуть записи, чьи display identity совпали с
+ * доказанно мёртвыми (`unreachable` в двух пробах подряд). Исходные строки
+ * сохраняются дословно (интерполяция `$VAR` — только для сопоставления);
+ * записи вне пробы не трогаются. Отказ при полном опустошении — решение
+ * «выкинуть всё» должно быть явным, а не побочным (как в `pruneByDisplay`).
+ *
+ * Нераспознанные записи (неразрешимый `$VAR`, неразбираемый эндпоинт) НЕ
+ * удаляются никогда: чистка убирает только доказанное, а «не понял» ≠ «мёртв».
+ * Они остаются в `keep` (файл переписывается дословно) и отдельно
+ * перечисляются в `unmatched` для отчёта.
+ */
+export function planProxyCleanup(
+  entries: readonly string[],
+  deadDisplays: readonly string[],
+  env: Record<string, string | undefined>,
+): ProxyCleanupPlan {
+  const dead = new Set(deadDisplays);
+  const keep: string[] = [];
+  const dropped: ProxyCleanupPlan["dropped"] = [];
+  const unmatched: string[] = [];
+  /** Живые записи файла (распознанные и не доказанно мёртвые). */
+  let live = 0;
+  for (const raw of entries) {
+    const resolved = interpolateEnvValue(raw, env);
+    const parsed = resolved ? parseProxyEndpoint(resolved) : undefined;
+    if (!parsed?.href || !parsed.display) {
+      unmatched.push(raw);
+      keep.push(raw);
+      continue;
+    }
+    if (dead.has(parsed.display)) {
+      dropped.push({ raw, display: parsed.display });
+      continue;
+    }
+    live += 1;
+    keep.push(raw);
+  }
+  // Опустошать пул целиком нельзя: живых записей не осталось, а удаляемых —
+  // хоть одна (значит, файл после чистки остался бы без единого выхода).
+  if (live === 0 && dropped.length > 0) {
+    return { keep: [...entries], dropped: [], unmatched, refused: "would-empty-pool" };
+  }
+  return { keep, dropped, unmatched };
 }
 
 /* ------------------------------------------------------------------ */
@@ -535,6 +610,13 @@ export function isConnectClassError(err: unknown, depth = 0): boolean {
     // включая динамические UND_ERR_SOCKS5_REPLY_<N> (host unreachable и т.п.).
     if (record.code.startsWith("UND_ERR_SOCKS5")) return true;
   }
+  // Отказ прокси установить туннель: ундичи бросает RequestAbortedError с
+  // кодом UND_ERR_ABORTED и сообщением «Proxy response (407) !== 200 when
+  // HTTP Tunneling» — это ОТКАЗ CONNECT (чаще всего стена авторизации
+  // прокси), а не «неизвестно». Туннель не поднят → до NIM запрос не дошёл,
+  // выход непригоден: CONNECT-класс (живой dispatch карантинит его так же,
+  // как ECONNREFUSED).
+  if (typeof record.message === "string" && PROXY_TUNNEL_REJECTED_RE.test(record.message)) return true;
   // Таймауты SOCKS-рукопожатия ундичи бросает без `code` (проверено на живой
   // 8.9.0: `new Error('SOCKS5 connection timeout')`) — узнаём по тексту.
   if (typeof record.message === "string" && /^SOCKS5 (?:connection|authentication) timeout$/.test(record.message)) return true;

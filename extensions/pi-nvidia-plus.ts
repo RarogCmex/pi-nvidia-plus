@@ -58,11 +58,14 @@ import {
   ProxyPool,
   ProxyRotator,
   maskProxy,
+  parseProxiesFileContent,
   parseRequestTimeouts,
+  planProxyCleanup,
   redactProxyCredentials,
   runProxyProbes,
   type ProxyProbeAttempt,
   type ProxyProbeEndpoint,
+  type ProxyProbeResultRow,
 } from "./proxy-pool.ts";
 import {
   classifyKeyAuthProbe,
@@ -1253,7 +1256,11 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
   // ── Пул ключей NIM (тикеты 15/23) ───────────────────────────────────────
   const cmdKeys = async (args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
       const arg = (args ?? "").trim().toLowerCase();
-      if (arg && arg !== "check" && arg !== "off" && arg !== "on") {
+      // Белый список деривится из каталога команд, а не дублируется вручную:
+      // новый аргумент в commands.ts не должен молча попадать в «неизвестные»
+      // (так сломались auth-check и cleanup-dead).
+      const knownArgs = (nvidiaPlusCommands().find((c) => c.name === "keys")?.args ?? []).map((a) => a.name.trimEnd());
+      if (arg && !knownArgs.includes(arg)) {
         const list = (nvidiaPlusCommands().find((c) => c.name === "keys")?.args ?? [])
           .map((a) => `${a.name} — ${a.description}`)
           .join("; ");
@@ -1522,10 +1529,35 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     }
   };
 
+  /**
+   * Человекочитаемая причина неудачной пробы выхода. Без неё сводка
+   * `proxy check` говорила только «не определены: 8» — и это число ни о чём
+   * не информировало: выход-то «неизвестен» был по разным причинам (стена
+   * авторизации прокси, таймаут, обрыв), а лечатся они по-разному.
+   * Текст ошибки уже обезличен (redactProxyCredentials) и обрезан до 120
+   * символов в шве проб.
+   */
+  const describeProbeFailure = (row: ProxyProbeResultRow): string => {
+    const detail = (row.error ?? "").replace(/^.*?(Proxy response \(|Error|Error:)/, "$1").slice(0, 60);
+    if (/Proxy response \(\d{3}\) !== 200 when HTTP Tunneling/.test(row.error ?? "")) {
+      return t("proxyCheckReasonTunnelRejected");
+    }
+    if (row.outcome === "unreachable") {
+      return t("proxyCheckReasonConnectFailed", { detail: detail || "—" });
+    }
+    if (/timeout/i.test(row.error ?? "")) {
+      return t("proxyCheckReasonTimeout");
+    }
+    return t("proxyCheckReasonUnknown", { detail: detail || "—" });
+  };
+
   const cmdProxy = async (args: string | undefined, ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]) => {
     const trimmed = (args ?? "").trim();
     const [verb, ...verbRest] = trimmed.split(/\s+/).filter(Boolean);
-    if (verb && verb !== "check" && verb !== "pin" && verb !== "on" && verb !== "off") {
+    // Белый список глаголов — из каталога команд (как у `keys`): новый
+    // аргумент не должен молча попадать в «неизвестные».
+    const knownVerbs = (nvidiaPlusCommands().find((c) => c.name === "proxy")?.args ?? []).map((a) => a.name.trimEnd());
+    if (verb && !knownVerbs.includes(verb)) {
       // Story 20: неизвестный аргумент — список глаголов, а не молчаливая панель.
       const list = (nvidiaPlusCommands().find((c) => c.name === "proxy")?.args ?? [])
         .map((a) => `${a.name.trimEnd()} — ${a.description}`)
@@ -1560,6 +1592,11 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
         return;
       }
       ctx.ui.notify(t("proxyPinnedSet", { display: id }), "info");
+      return;
+    }
+    if (verb === "cleanup-dead") {
+      // Симметрия с `keys cleanup-dead`: тот же глагол — тот же смысл.
+      await cleanupDeadProxies(ctx);
       return;
     }
     if (verb === "check") {
@@ -1617,6 +1654,12 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
           .filter((row) => row.outcome === "ok")
           .map((row) => t("proxyCheckOkRow", { display: row.display, ms: row.latencyMs ?? 0 }))
           .join("");
+        // Не-ok выходы — с причиной: «не определены: 8» без объяснения, что
+        // случилось, бесполезно (407-стена и таймаут лечатся по-разному).
+        const badRows = plan.rows
+          .filter((row) => row.outcome !== "ok")
+          .map((row) => t("proxyCheckBadRow", { display: row.display, reason: describeProbeFailure(row) }))
+          .join("");
         // Story 14 + исходы проб в состояние сессии — одной операцией шва
         // (applyProbeResults): ok пишет exit quality и гасит карантин,
         // unreachable карантинит (TTL), самый быстрый ok становится pin.
@@ -1632,6 +1675,7 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
             unreachable: counts.unreachable,
             unknown: counts.unknown,
             okRows,
+            badRows,
             pinNote,
             abortedNote,
           }),
@@ -1647,6 +1691,111 @@ export default function piNvidiaPlus(pi: ExtensionAPI): void {
     // Пустые аргументы — панель настроек (story 53).
     ctx.ui.notify(proxyPanelText(), "info");
   };
+
+  // ── Чистка мёртвых эндпоинтов пула: `proxy cleanup-dead` ───────────────
+  // Симметрично `keys cleanup-dead`: проба достижимости (keyless GET
+  // /v1/models через каждый выход), вердикт «мёртв» подтверждается повтором,
+  // файл переписывается с резервом (права 0600); инлайн-источник окружения
+  // не трогает — его нечем переписать. Полная зачистка пула — отказ.
+  // Объявление — функцией (хостится выше `cmdProxy`, который её зовёт).
+  async function cleanupDeadProxies(ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1]): Promise<void> {
+    const source = proxyPool.winningSource();
+    if (!source || source.kind === "inline" || source.kind === "legacy") {
+      ctx.ui.notify(t("proxyCleanupNoFile", { source: proxyPool.describe() }), "error");
+      return;
+    }
+    const file = source.path;
+    const pool = proxyPool.refresh();
+    proxyRotator.setPool(pool);
+    if (pool.length === 0) {
+      const errors = proxyPool.parseErrors();
+      ctx.ui.notify(
+        errors.length > 0
+          ? t("proxyPoolIntroParseErrors", { source: proxyPool.describe(), errors: errors.join("; ") })
+          : t("proxyPoolNotSet", { file: agentFile(DEFAULT_PROXIES_FILE_NAME) }),
+        "info",
+      );
+      return;
+    }
+    ensureTransportInstalled();
+    const { undici, error } = resolvePiUndici();
+    if (!undici) {
+      ctx.ui.notify(t("proxyCheckFailed", { error: error ?? "undici" }), "error");
+      return;
+    }
+    ctx.ui.notify(t("proxyCleanupStart", { count: pool.length }), "info");
+    try {
+      const endpoints: ProxyProbeEndpoint[] = pool.map((href) => ({ href, display: maskProxy(href) }));
+      const first = await runProxyProbes(
+        endpoints,
+        (endpoint) => probeProxyEndpoint(undici, endpoint),
+        { concurrency: PROXY_CHECK_CONCURRENCY },
+      );
+      // Вердикт «мёртв» требует подтверждения: недоступные в первом прогоне
+      // перепроверяются (одиночный CONNECT-сбой — карантин, а не приговор).
+      const suspects = first.rows.filter((row) => row.outcome === "unreachable");
+      let rows = first.rows;
+      if (suspects.length > 0) {
+        const suspectEndpoints = suspects
+          .map((row) => endpoints.find((endpoint) => endpoint.display === row.display))
+          .filter((endpoint): endpoint is ProxyProbeEndpoint => endpoint !== undefined);
+        const second = await runProxyProbes(
+          suspectEndpoints,
+          (endpoint) => probeProxyEndpoint(undici, endpoint),
+          { concurrency: PROXY_CHECK_CONCURRENCY },
+        );
+        const secondByDisplay = new Map(second.rows.map((row) => [row.display, row]));
+        rows = first.rows.map((row) => secondByDisplay.get(row.display) ?? row);
+      }
+      const dead = rows.filter((row) => row.outcome === "unreachable");
+      // Итоги проб — в состояние сессии (карантин недоступных), как в check.
+      proxyRotator.applyProbeResults(rows);
+      if (dead.length === 0) {
+        ctx.ui.notify(t("proxyCleanupNoneDead"), "info");
+        return;
+      }
+      const raw = readFileSync(file, "utf8");
+      const parsed = parseProxiesFileContent(raw);
+      if (!parsed.proxies) {
+        ctx.ui.notify(t("proxyCheckFailed", { error: parsed.error ?? "?" }), "error");
+        return;
+      }
+      const plan = planProxyCleanup(parsed.proxies, dead.map((row) => row.display), process.env);
+      if (plan.refused) {
+        ctx.ui.notify(t("proxyCleanupRefusedEmpty", { file }), "error");
+        return;
+      }
+      if (plan.dropped.length === 0) {
+        // Недоступные есть, но в файле их записей не оказалось (правка файла
+        // между refresh и записью, источник вне файла): удалять нечего.
+        ctx.ui.notify(t("proxyCleanupNoneDead"), "info");
+        return;
+      }
+      const backup = `${file}.bak-${Date.now()}`;
+      copyFileSync(file, backup);
+      chmodSync(backup, 0o600);
+      // Прочие верхнеуровневые ключи файла пользователя сохраняются —
+      // заменяется только массив `proxies`.
+      const rewritten = JSON.parse(raw) as Record<string, unknown>;
+      rewritten.proxies = plan.keep;
+      writeFileSync(file, `${JSON.stringify(rewritten, null, 2)}\n`, { mode: 0o600 });
+      chmodSync(file, 0o600);
+      // Кольцо сессии — без выбывших (setPool сам снимет их pin/кулдауны).
+      const deadDisplays = new Set(dead.map((row) => row.display));
+      proxyRotator.setPool(pool.filter((href) => !deadDisplays.has(maskProxy(href))));
+      ctx.ui.notify(
+        t("proxyCleanupApplied", {
+          removed: plan.dropped.length,
+          kept: plan.keep.length,
+          displays: plan.dropped.map((entry) => entry.display).join(", "),
+          backup,
+        }),
+        plan.keep.length === 0 ? "warning" : "info",
+      );
+    } catch (e) {
+      ctx.ui.notify(t("proxyCheckFailed", { error: e instanceof Error ? e.message : String(e) }), "error");
+    }
+  }
 
   // ── Живое обнаружение моделей (тикет 12) ───────────────────────────────
   // Триггер — команда, а не старт сессии: обнаружение опционально и не должно

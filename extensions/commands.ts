@@ -97,6 +97,7 @@ export function nvidiaPlusCommands(): CommandSpec[] {
       args: [
         arg("check", "cmdProxyCheckDesc"),
         { name: "pin ", description: t("cmdProxyPinDesc") },
+        arg("cleanup-dead", "cmdProxyCleanupDeadDesc"),
         arg("on", "cmdProxyOnDesc"),
         arg("off", "cmdProxyOffDesc"),
       ],
