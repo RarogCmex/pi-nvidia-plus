@@ -873,6 +873,20 @@ export const MESSAGES = {
     en: " (thinking is force-disabled: this model hangs in thinking mode — no response within the 120 s header timeout at any level, and answers in ~2 s with enable_thinking=false)",
     ru: " (мышление выключено принудительно: в режиме мышления модель виснет — ответ не приходит за 120 с при любом уровне, а с enable_thinking=false отвечает за ~2 с)",
   },
+  // GLM-5.3-flash / Muse Glimmer: `off` — не выключатель. Без этого текста
+  // пользователь видит «thinking off · reasoning_effort="low"» и не понимает,
+  // почему модель всё равно думает.
+  planCaveatReasoningAlwaysOn: {
+    en: " (reasoning cannot be turned off on this model — `off` is the smallest budget it accepts, not a switch)",
+    ru: " (у этой модели reasoning не выключается — off это минимальный бюджет, который она принимает, а не выключатель)",
+  },
+  // DiffusionGemma (пробы 2026-10-30): без enable_thinking=true модель отдаёт
+  // пустой content (1 токен, в pi — мусорный тег), поэтому мышление включено
+  // принудительно, как у gemma-4 — только оно там выключено.
+  planCaveatDiffusionGemmaEmpty: {
+    en: " (thinking is force-enabled at every level: with enable_thinking=false this model answers with an empty thought tag instead of content)",
+    ru: " (мышление включено принудительно на любом уровне: с enable_thinking=false модель отдаёт пустой thought-тег вместо ответа)",
+  },
 
   // ── Живое обнаружение (тикет 12) ─────────────────────────────────────
   discoverHttpError: {

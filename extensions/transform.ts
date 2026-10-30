@@ -48,6 +48,19 @@ const NEMOTRON_THINKING_MODELS = new Set([
 // мышление выключается насильно на любом уровне — иначе модель непригодна.
 const GEMMA4 = /^google\/gemma-4/;
 
+// DiffusionGemma (пробы 2026-10-30, наша же сессия, hosted-эндпоинт):
+// без `chat_template_kwargs.enable_thinking=true` модель отдаёт пустоту — 1
+// выходной токен и `content: ""` на тривиальный промпт; в pi это выглядит как
+// ответ `<channel|>` вместо ответа. Карточка pi предлагает селектор
+// `reasoning: true`, но ни одного параметра не шлёт, поэтому инжект здесь
+// принудительный на любом уровне — как у gemma-4, только в другую сторону.
+const DIFFUSIONGEMMA = /^google\/diffusiongemma/;
+
+// Muse Glimmer: `reasoning_effort` документирован целиком (`none`…`max`), но
+// замер 2026-10-30: даже `none` оставляет reasoning-канал (69 токенов против 129
+// на `high`) — то есть `off` в UI значит «минимум», а не «выключено».
+const MUSE_GLIMMER = /^meta\/muse-glimmer/;
+
 // ── Гипотезы из референсов ────────────────────────────────────────────────
 // Источник — `pi-extension-nvidia-nim@1.5.1` (npm, MIT; `handlers/thinking.ts`,
 // `config/model-families.ts`), разбор — research/05-reference-plugins.md.
@@ -82,6 +95,9 @@ function minimaxThinkingMode(level: string): string {
  * `thinkingPlanCaveat`, который переводит i18n-слой.
  */
 export function thinkingPlan(modelId: string, level: string): string | undefined {
+  if (DIFFUSIONGEMMA.test(modelId)) {
+    return "chat_template_kwargs.enable_thinking=true";
+  }
   if (GEMMA4.test(modelId)) {
     return "chat_template_kwargs.enable_thinking=false";
   }
@@ -99,9 +115,7 @@ export function thinkingPlan(modelId: string, level: string): string | undefined
       : "chat_template_kwargs.thinking=true, reasoning_effort";
   }
   if (GLM.test(modelId)) {
-    if (level === "off") return "chat_template_kwargs.enable_thinking=false, clear_thinking=true";
-    const effort = level === "minimal" ? "" : `, reasoning_effort=${level === "xhigh" || level === "max" ? "max" : "high"}`;
-    return `chat_template_kwargs.enable_thinking=true, clear_thinking=false${effort}`;
+    return `chat_template_kwargs.enable_thinking=true, clear_thinking=true, reasoning_effort="${glmEffort(level)}"`;
   }
   return undefined;
 }
@@ -112,8 +126,12 @@ export function thinkingPlan(modelId: string, level: string): string | undefined
  * намеренно нет готового текста, чтобы `PI_NVIDIA_PLUS_LANG=en` не получал
  * русскую строку.
  */
-export function thinkingPlanCaveat(modelId: string): "planCaveatGemma4Hangs" | undefined {
+export function thinkingPlanCaveat(
+  modelId: string,
+): "planCaveatGemma4Hangs" | "planCaveatReasoningAlwaysOn" | "planCaveatDiffusionGemmaEmpty" | undefined {
   if (GEMMA4.test(modelId)) return "planCaveatGemma4Hangs";
+  if (DIFFUSIONGEMMA.test(modelId)) return "planCaveatDiffusionGemmaEmpty";
+  if (GLM.test(modelId) || MUSE_GLIMMER.test(modelId)) return "planCaveatReasoningAlwaysOn";
   return undefined;
 }
 
@@ -186,6 +204,13 @@ function ensureChatTemplateKwargs(payload: Payload): Payload {
 
 /** Инжектит thinking по семейству; возвращает, изменён ли пейлоад. */
 function applyThinking(payload: Payload, modelId: string, level: string): boolean {
+  if (DIFFUSIONGEMMA.test(modelId)) {
+    const kwargs = ensureChatTemplateKwargs(payload);
+    if (kwargs.enable_thinking === true) return false;
+    kwargs.enable_thinking = true;
+    delete kwargs.low_effort;
+    return true;
+  }
   if (GEMMA4.test(modelId)) {
     const kwargs = ensureChatTemplateKwargs(payload);
     if (kwargs.enable_thinking === false) return false;
@@ -268,41 +293,40 @@ function applyDeepSeekV4Thinking(payload: Payload, level: string): boolean {
 }
 
 /**
- * GLM (гипотеза из референсов, живых моделей нет — не проверена): пи в формате
- * `zai` шлёт объект `thinking` + `reasoning_effort`; GLM на NIM требует
- * `enable_thinking`/`clear_thinking` в `chat_template_kwargs` и отображённое
- * усилие top-level (референс-хендлер "qwen-chat-template" для `z-ai/glm`).
+ * GLM: мышление выключить НЕЛЬЗЯ (документация NVIDIA по GLM-5.3-Flash,
+ * 2026-10-30: «Reasoning cannot be turned off», `enable_thinking=false` не
+ * останавливает генерацию reasoning; `none`/`minimal`/`medium`/`xhigh` сервер
+ * принимает, но исполняет на `max`). Поддерживаются `low`/`high`/`max`, дефолт —
+ * `max`. Поэтому все уровни пи сводятся к этим трём, а `off` — самый дешёвый из
+ * возможных (`low`), о чём предупреждает оговорка `planCaveatReasoningAlwaysOn`.
+ * `clear_thinking=true` — рекомендация вендора именно для чата (между ходами
+ * прошлое reasoning не надо тащить в промпт). Прежний вариант («гипотеза»:
+ * enable_thinking=false для off, clear_thinking=false) был неверен по всем трём
+ * пунктам и принят был только по отсутствию живых моделей семейства.
  */
+function glmEffort(level: string): string {
+  if (level === "xhigh" || level === "max") return "max";
+  if (level === "medium" || level === "high") return "high";
+  return "low";
+}
+
 function applyGlmThinking(payload: Payload, level: string): boolean {
   const kwargs = ensureChatTemplateKwargs(payload);
-  const on = level !== "off";
   let modified = false;
-  if (kwargs.enable_thinking !== on) {
-    kwargs.enable_thinking = on;
+  if (kwargs.enable_thinking !== true) {
+    kwargs.enable_thinking = true;
     modified = true;
   }
-  const clear = !on;
-  if (kwargs.clear_thinking !== clear) {
-    kwargs.clear_thinking = clear;
+  if (kwargs.clear_thinking !== true) {
+    kwargs.clear_thinking = true;
     modified = true;
   }
   if ("preserve_thinking" in kwargs) {
     delete kwargs.preserve_thinking;
     modified = true;
   }
-  const effort = on
-    ? level === "xhigh" || level === "max"
-      ? "max"
-      : level === "minimal"
-        ? undefined
-        : "high"
-    : undefined;
-  if (effort === undefined) {
-    if ("reasoning_effort" in payload) {
-      delete payload.reasoning_effort;
-      modified = true;
-    }
-  } else if (payload.reasoning_effort !== effort) {
+  const effort = glmEffort(level);
+  if (payload.reasoning_effort !== effort) {
     payload.reasoning_effort = effort;
     modified = true;
   }

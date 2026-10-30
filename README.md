@@ -14,10 +14,11 @@ Pi extension that improves the built-in `nvidia` provider **in place** — no du
 
 1. **Thinking control.** The built-in catalog marks almost all models as `supportsReasoningEffort: false`, so `--thinking high` is silently dropped. This extension injects thinking parameters per model family via `before_provider_request`:
    - Nemotron 3.x → `chat_template_kwargs.enable_thinking` (+ `low_effort`)
-   - GLM (`z-ai/glm*`) → `enable_thinking` / `clear_thinking` + `reasoning_effort`
+   - GLM (`z-ai/glm*`) → `enable_thinking` / `clear_thinking` + `reasoning_effort` (reasoning cannot be switched off on GLM-5.3-Flash — see [Limitations](#limitations))
    - DeepSeek V4 → `chat_template_kwargs.thinking` / `reasoning_effort` *(family is EOL on NIM — kept for the ids that still answer)*
    - MiniMax M3 → `thinking_mode: disabled | adaptive | enabled` *(id returns 410)*
    - Gemma 4 → thinking is **force-disabled at every level** (see [Limitations](#limitations))
+   - DiffusionGemma → thinking is **force-enabled at every level** (without it the model answers with an empty thought tag, see [Limitations](#limitations))
    - Explicit **off** really disables thinking where the model thinks by default.
 2. **Stale catalog.** Dead models (HTTP 410/404 on the live NIM endpoint) produce warnings instead of silent failures; missing live models can be added via `/nvidia-plus discover`.
 3. **Request normalization.** Text content-arrays are flattened to strings for older models; a default `max_tokens` is set when the model requires it.
@@ -74,9 +75,10 @@ catalog stays authoritative. Two things are layered on top:
 
 **1. Metadata overrides** (`overrides/models.json`, applied to
 `~/.pi/agent/models.json` by `/nvidia-plus apply`, automatically on session
-start). Nine ids carry an override; seven of those add `reasoning: true` plus
-a `thinkingLevelMap`, which is what makes pi's `--thinking <level>` selector
-reachable for them at all. Where the live card disagrees with pi's generated
+start). Ten ids carry an override; eight of those add `reasoning: true` plus
+a `thinkingLevelMap` (one more carries a `thinkingFormat` instead, one a single
+`compat` flag), which is what makes pi's `--thinking <level>` selector reachable
+for them at all. Where the live card disagrees with pi's generated
 catalog, the override also carries the corrected `contextWindow` (live-probe
 evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2):
 
@@ -86,8 +88,10 @@ evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2
 | `nvidia/nemotron-3-ultra-550b-a55b` | same |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | same |
 | `nvidia/nemotron-3.5-lightning-30b-a3b` | same, plus `contextWindow` 1M (live-probe confirmed, as above) |
-| `z-ai/glm-5.3`, `z-ai/glm-5.3-flash` | same |
+| `z-ai/glm-5.3-flash` | same map shape; the wire parameters come from the family hook below, because the vendor supports only `low`/`high`/`max` and refuses to be switched off |
 | `openai/gpt-oss-20b` | native `reasoning_effort`: `off`→omitted · `minimal`→low · `xhigh`/`max`→high |
+| `nvidia/nemotron-3.5-super-vl-120b-a12b` | native `reasoning_effort`, **live-probed 2026-10-30**: `off`→none (0 reasoning tokens) · `minimal`/`low`→low · `medium`→medium · `high`/`xhigh`/`max`→high; `"off"` as a wire value is a 400, so the map is what keeps it working; `maxTokens` 32768 (pi's own card said 8192 — reasoning alone ate the whole budget, see Limitations) |
+| `meta/muse-glimmer-30b` | native `reasoning_effort` (docs + probe 2026-10-30): `off`→none · `minimal`/`low`→low · `medium`→medium · `high`→high · `xhigh`/`max`→max; plus the vendor's sampling pair `temperature 0.95, top_p 1.0`. `none` still emits a short trace (69 vs 129 completion tokens at `high`) — `off` means *least*, and the status line says so |
 | `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
 | `deepseek-ai/deepseek-v4.1-flash` | `supportsReasoningEffort: true` — the one field pi's own card (1.3.0+) lacks; the levels come from pi's map (`high`/`max`), and the family hook below moves the effort into `chat_template_kwargs` |
 
@@ -156,11 +160,12 @@ wire parameters if its id matches a family prefix:
 | family (id prefix) | injected | verified |
 |---|---|---|
 | `nvidia/nemotron-3*`, `nvidia/nemotron-3.5*` — **verified ids only**, not a prefix match (`NEMOTRON_THINKING_MODELS` in `transform.ts`) | `chat_template_kwargs.enable_thinking`, `low_effort` at `minimal`/`low` | live probes |
-| `z-ai/glm*` | `enable_thinking` + `clear_thinking`, `reasoning_effort` (`high`/`max`) | **hypothesis** — extrapolated from the family, not probed per id |
+| `z-ai/glm*` | `enable_thinking=true` + `clear_thinking=true` (vendor's advice for chat) and top-level `reasoning_effort` clamped to the vendor's real scale: `off`/`minimal`/`low`→`low`, `medium`/`high`→`high`, `xhigh`/`max`→`max` | documented by NVIDIA for GLM-5.3-Flash (2026-10-30); the previous mapping was a hypothesis and got all three points wrong |
 | `deepseek-ai/deepseek-v4*` | `chat_template_kwargs.thinking` + `reasoning_effort` | probed 2026-08-28 on `-pro-0813`; family EOL except the new `-v4.1-flash` |
 | `minimaxai/minimax-m3` | `thinking_mode: disabled \| adaptive \| enabled` | id returns 410 |
 | `minimaxai/minimax-m3.1-flash` | native `reasoning_effort` (`off`→`none`; `off` value is a 400) | `thinking_mode` kwarg ignored — probe 2026-10-23 |
 | `google/gemma-4*` | `enable_thinking=false` at **every** level | live probes — see Limitations; `gemma-4-31b-it` also hangs with the kwarg (2026-10-23) |
+| `google/diffusiongemma*` | `enable_thinking=true` at **every** level | probed 2026-10-30: with `false` (and on the default, which equals `false`) the hosted endpoint returns `finish_reason: "stop"` and 1 completion token with empty `content` — pi renders it as `<channel\|>`; with `true` the same prompt answers normally |
 
 `/nvidia-plus status` (and the live status line) print the exact thinking
 parameter that reaches NIM for the selected model and level. For hook-driven
@@ -274,9 +279,45 @@ mechanics — is written up in [`research/`](research/); start at
   tested route (direct + 10 exits), even with thinking disabled — a NIM-side
   degradation of the model×exit route, which the timeout watchdog surfaces
   quickly but cannot route around ([research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §3).
-- **GLM mappings are unverified hypotheses.** `z-ai/glm*` injection is
-  extrapolated from the family, not probed id by id. If an upstream rejects
-  `chat_template_kwargs`, the request 400s.
+- **GLM-5.3-Flash reasoning cannot be turned off.** NVIDIA's documentation
+  (2026-10-30) is explicit: «Reasoning cannot be turned off», the supported
+  scale is `low`/`high`/`max` with `max` as default, `none`/`minimal`/`medium`/
+  `xhigh` are accepted but **run at `max`**, and
+  `chat_template_kwargs.enable_thinking=false` does not stop reasoning. So the
+  extension never sends those four values (they would be a silent escalation) and
+  maps `off` to `low` — the cheapest budget available — telling you so in the
+  status line (`planCaveatReasoningAlwaysOn`). `clear_thinking=true` is injected
+  because the vendor asks chat scenarios to pass it; `z-ai/glm-5.3` itself
+  returned 410 EOL 2026-10-28 and is now in the dead-model list (id gone from
+  `/v1/models` too), so its override was removed. This mapping rests on vendor
+  documentation, **not** on a live probe: on 2026-10-30 `z-ai/glm-5.3-flash`
+  answered nothing at all — direct plus four pool exits each timed out on
+  headers (15 attempts, `max_tokens: 512`), the same all-routes hang that
+  [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) describes.
+  Re-probe when the route recovers: three requests settle it (see
+  `scripts/probe-catalog-fields.mjs` §6).
+- **DiffusionGemma is force-enabled, not switchable.** On 2026-10-30 the hosted
+  endpoint answered `Reply with exactly the word OK.` / `Name the capital of
+  France.` with `finish_reason: "stop"`, **one** completion token and an empty
+  `content` — both with `enable_thinking=false` and with no parameter at all;
+  with `enable_thinking=true` the same prompts answer (`OK`, `Paris`). Through pi
+  the `--thinking off` path rendered the model's empty thought tag literally as
+  `<channel|>`. So the hook sends `enable_thinking=true` at every level (the
+  mirror image of the Gemma 4 rule); there is no override card, the level
+  selector just stops mattering for this id. `off` here cannot mean “no
+  reasoning”, and the status line says so via `planCaveatDiffusionGemmaEmpty`.
+- **Muse Glimmer: `off` is “least”, not “none”.** Its reference documents
+  `reasoning_effort` `none`…`max`; measured 2026-10-30: `none` returns 200 with a
+  reasoning trace anyway (69 completion tokens vs 129 at `high`). The map still
+  sends `none` (cheapest documented value) and the status line carries
+  `planCaveatReasoningAlwaysOn`.
+- **`stepfun-ai/step-5-preview` reasons whether you want it or not.** Its NIM
+  card says reasoning stays enabled on this checkpoint and explicitly warns not
+  to set `enable_thinking=false` (it does not stop reasoning generation); the
+  hosted schema exposes no `reasoning_effort` either. No thinking parameter is
+  injected for it at any level — that is the vendor's design, not an omission.
+  `max_tokens` ceiling 1 048 576 matches pi's card, and pi clamps it per request
+  to the room actually left, so the huge number is harmless.
 - **NIM routes degrade per (model × exit), not per exit.** Measured
   2026-10-12 ([research 10](research/10-nim-route-dependent-hangs-2026-10-12.md)):
   the same exit hung on `z-ai/glm-5.3` while answering `moonshotai/kimi-k3` in
@@ -299,21 +340,30 @@ mechanics — is written up in [`research/`](research/); start at
   `overrides/models.json` still gets request-level injection if its family
   matches, but pi's UI will not offer a thinking selector for it until the
   override adds `reasoning: true` + `thinkingLevelMap`.
-- **pi 1.4.0's default NVIDIA model is not covered yet.**
-  `nvidia/nemotron-3.5-super-vl-120b-a12b` is in neither
-  `NEMOTRON_THINKING_MODELS` nor `overrides/models.json`, so nothing this
-  extension injects reaches it — and pi's own card asks for no thinking
-  parameter either (`supportsReasoningEffort: false`, no `thinkingLevelMap`,
-  `thinkingFormat` not one of the wired ones), so the request goes out without
-  one at every level while the selector still offers `off`…`high`. Adding a
-  mapping needs a live probe: the vendor card suggests
-  `chat_template_kwargs.enable_thinking` with a `medium_effort` middle level,
-  which is exactly what a 400-or-silent-default probe has to settle. The probes
-  are staged in `scripts/probe-catalog-fields.mjs` (§1 sampling, §2 the
-  `max_tokens` ceiling, §6 thinking — the next free section of research 11,
-  whose §3 is the vision decision) together with the other new id,
-  `stepfun-ai/step-5-preview`; running them spends key quota, so they wait for
-  an explicit request.
+- **pi 1.4.0's default NVIDIA model needed two fields pi's card lacked.**
+  `nvidia/nemotron-3.5-super-vl-120b-a12b` used to be uncovered: pi's card has
+  `maxTokens: 8192`, `supportsReasoningEffort: false` and no `thinkingLevelMap`,
+  so no thinking parameter went out at **any** level, while the model's
+  reasoning is on by default and its reasoning tokens count toward
+  `max_tokens`. Every answer was therefore all reasoning and no content, ending
+  in `finish_reason: "length"` — the turn pi renders as *Response was truncated
+  before completion.* (a full session of it: research 14). The override now sets
+  `compat.supportsReasoningEffort: true` with the documented `none`/`low`/`high`
+  scale (`off`→`none`, which really disables reasoning tokens) and raises
+  `maxTokens` to the model card's 32768 (server default 16384). The
+  `chat_template_kwargs.enable_thinking` route from the vendor card is
+  deliberately **not** used: NVIDIA documents `reasoning_effort` as the
+  preferred field, and mixing both would leave two owners for one decision.
+  Still unverified live: the exact `max_tokens` ceiling (the reference says
+  32768, the hosted-endpoint note says 131072 — the 400-oracle in
+  `scripts/probe-catalog-fields.mjs` §2 settles it in two requests) and the
+  vision sampling pair (`0.6`/`0.95` for images vs `1.0`/`0.95` for text), which
+  is why no `samplingParams` were written.
+- **Truncation loops come from `pi-retry`, not from here.** Any `length` stop
+  auto-continues (uncapped, hidden turns) in `@monotykamary/pi-retry`; with a
+  model that spends its whole budget thinking, that produced ~90 continuation
+  turns in the same session. The catalog fix removes the cause; the loop itself
+  is that extension's design.
 - **Side files in pi's agent dir** (`~/.pi/agent/` by default, `$PI_CODING_AGENT_DIR`
   when set). `nvidia-plus-models.json` (the ownership
   ledger), `nvidia-plus-discovered.json` (discover results),
@@ -425,7 +475,8 @@ Run it from a shell that is **not** inside a live pi session sharing
 `~/.pi/agent`: assertion 4 snapshots the default dir name+size+mtime, and a pi
 running beside it writes its own session transcripts there. Measured twice
 2026-10-22 on pi 1.4.0 — assertions 1–3 green both times (11 overrides applied
-then; nine since the 2026-10-23 catalog sync),
+then; nine since the 2026-10-23 catalog sync, eleven since the 2026-10-30
+super-vl / muse-glimmer / diffusiongemma audit),
 assertion 4 listed 7 and then 8 changed files, all of them session transcripts
 and cache files (`alibaba-cache.jsonl`, a frecency `data.mdb`), with
 `models.json` and the ledger absent from the list (the ledger's own mtime moved
@@ -483,7 +534,7 @@ live on NIM — its override stays and applies again as soon as
 locally; CI pins 5.9.3) plus all 27 test files are green, Node 26.10. Loading on
 1.0.0, 1.0.4, 1.2.0 and 1.4.0 was checked in an isolated `PI_CODING_AGENT_DIR`:
 `models.json` (nine overrides plus two curated cards for ids outside pi's
-built-in catalog) and `nvidia-plus-models.json` appear there and
+built-in catalog — eleven and two since the 2026-10-30 card audit) and `nvidia-plus-models.json` appear there and
 `--list-models nvidia` prints the built-in catalog with and without the extension
 (19=19 on 1.0.0; 21=21 on 1.0.4; 21=21 on 1.4.0, where the two lists differ in
 exactly one cell — `nemotron-3.5-lightning-30b-a3b`'s context, 262.1K built-in vs

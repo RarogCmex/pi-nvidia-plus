@@ -131,37 +131,53 @@ const dsMax = transformRequest(
 assert.equal(kwargs(dsMax.payload).thinking, true, "DeepSeek V4: max не включает thinking в kwargs");
 assert.equal(kwargs(dsMax.payload).reasoning_effort, "max", "DeepSeek V4: effort max не перенесён");
 
-// GLM (z-ai/glm*): enable_thinking + clear_thinking в kwargs, усилие —
-// отображённое в top-level `reasoning_effort` (референс: формат "qwen-chat-template").
+// GLM (z-ai/glm*): мышление выключить НЕЛЬЗЯ (документация NVIDIA по
+// GLM-5.3-Flash, 2026-10-30): `enable_thinking=false` не останавливает reasoning,
+// `none`/`minimal`/`medium`/`xhigh` сервер исполняет на `max`, поддерживаются
+// low/high/max. Значит уходят: `enable_thinking=true`, `clear_thinking=true`
+// (рекомендация для чата) и top-level `reasoning_effort` только из этих трёх.
 const GLM = "z-ai/glm-5";
 const glmOn = transformRequest(
   { model: GLM, thinking: { type: "enabled", clear_thinking: false }, reasoning_effort: "medium" },
   { modelId: GLM, thinkingLevel: "medium" },
 );
-assert.equal(kwargs(glmOn.payload).enable_thinking, true, "GLM: enable_thinking не включён");
-assert.equal(kwargs(glmOn.payload).clear_thinking, false, "GLM: clear_thinking должен быть false");
+assert.equal(kwargs(glmOn.payload).enable_thinking, true, "GLM: enable_thinking не выставлен в true");
+assert.equal(kwargs(glmOn.payload).clear_thinking, true, "GLM: clear_thinking должен быть true (вендор — про чат)");
 assert.equal(glmOn.payload.reasoning_effort, "high", "GLM: medium не отображён в high");
 assert.equal(glmOn.payload.thinking, undefined, "GLM: pi-объект thinking не удалён");
 
 const glmMax = transformRequest(
-  { model: GLM, thinking: { type: "enabled" }, reasoning_effort: "max" },
+  { model: GLM, thinking: { type: "enabled" }, reasoning_effort: "low" },
   { modelId: GLM, thinkingLevel: "max" },
 );
-assert.equal(glmMax.payload.reasoning_effort, "max", "GLM: max не сохранён");
+assert.equal(glmMax.payload.reasoning_effort, "max", "GLM: max не отображён в max");
 
-const glmMinimal = transformRequest(
-  { model: GLM, thinking: { type: "enabled" }, reasoning_effort: "minimal" },
-  { modelId: GLM, thinkingLevel: "minimal" },
-);
-assert.equal(glmMinimal.payload.reasoning_effort, undefined, "GLM: minimal должен убратьть effort");
-
-const glmOff = transformRequest(
-  { model: GLM, thinking: { type: "disabled" }, reasoning_effort: "high" },
-  { modelId: GLM, thinkingLevel: "off" },
-);
-assert.equal(kwargs(glmOff.payload).enable_thinking, false, "GLM: off не выключил мышление");
-assert.equal(kwargs(glmOff.payload).clear_thinking, true, "GLM: off должен ставить clear_thinking");
-assert.equal(glmOff.payload.reasoning_effort, undefined, "GLM: off должен убратьть effort");
+for (const [level, effort] of [
+  ["off", "low"],
+  ["minimal", "low"],
+  ["low", "low"],
+  ["high", "high"],
+  ["xhigh", "max"],
+] as const) {
+  const r = transformRequest(
+    { model: GLM, thinking: { type: "enabled" }, reasoning_effort: "medium" },
+    { modelId: GLM, thinkingLevel: level },
+  );
+  assert.equal(r.payload.reasoning_effort, effort, `GLM: ${level} → ${effort}`);
+  assert.equal(kwargs(r.payload).enable_thinking, true, `GLM: ${level} — enable_thinking выключен, а так нельзя`);
+}
+// `none`/`minimal`/`medium` на провод не идут никогда: сервер исполняет их на max.
+for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+  const r = transformRequest(
+    { model: GLM, thinking: { type: "enabled" } },
+    { modelId: GLM, thinkingLevel: level },
+  );
+  assert.ok(
+    ["low", "high", "max"].includes(String(r.payload.reasoning_effort)),
+    `GLM: ${level} дал ${String(r.payload.reasoning_effort)} — вне документированного набора low|high|max`,
+  );
+  assert.equal(kwargs(r.payload).clear_thinking, true, `GLM: ${level}: clear_thinking не выставлен`);
+}
 
 // GLM: preserve_thinking (ставит нативный механизм пи) заменяется на схему clear_thinking.
 const glmPreserve = transformRequest(
@@ -172,8 +188,16 @@ assert.equal(kwargs(glmPreserve.payload).preserve_thinking, undefined, "GLM: pre
 
 // 10. Планы для новых семейств видны в диагностике.
 assert.equal(thinkingPlan(DSV4, "high"), "chat_template_kwargs.thinking=true, reasoning_effort");
-assert.equal(thinkingPlan(GLM, "off"), "chat_template_kwargs.enable_thinking=false, clear_thinking=true");
-assert.equal(thinkingPlan(GLM, "high"), "chat_template_kwargs.enable_thinking=true, clear_thinking=false, reasoning_effort=high");
+assert.equal(
+  thinkingPlan(GLM, "off"),
+  'chat_template_kwargs.enable_thinking=true, clear_thinking=true, reasoning_effort="low"',
+);
+assert.equal(
+  thinkingPlan(GLM, "high"),
+  'chat_template_kwargs.enable_thinking=true, clear_thinking=true, reasoning_effort="high"',
+);
+// GLM не умеет выключать reasoning — статус обязан это сказать.
+assert.equal(thinkingPlanCaveat(GLM), "planCaveatReasoningAlwaysOn");
 
 // 11. Nemotron 3-nano и omni (живые пробы тикета 19): та же механика, что у super/lightning.
 for (const modelId of ["nvidia/nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"]) {
@@ -202,6 +226,19 @@ for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"])
 // PI_NVIDIA_PLUS_LANG=en получал бы русскую строку в статус-баре.
 assert.equal(thinkingPlan(GEMMA4, "high"), "chat_template_kwargs.enable_thinking=false");
 assert.equal(thinkingPlanCaveat(GEMMA4), "planCaveatGemma4Hangs", "для gemma-4 нужна оговорка");
+// DiffusionGemma: мышление включено принудительно на любом уровне (пробы 2026-10-30:
+// без enable_thinking=true hosted отдаёт пустой content — в pi видно как `<channel|>`).
+const DIFFUSION = "google/diffusiongemma-26b-a4b-it";
+for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+  const r = transformRequest({ model: DIFFUSION }, { modelId: DIFFUSION, thinkingLevel: level });
+  assert.equal(kwargs(r.payload).enable_thinking, true, `diffusiongemma ${level}: мышление должно быть включено`);
+  assert.ok(!("low_effort" in kwargs(r.payload)), `diffusiongemma ${level}: low_effort лишний`);
+}
+assert.equal(thinkingPlan(DIFFUSION, "off"), "chat_template_kwargs.enable_thinking=true");
+assert.equal(thinkingPlanCaveat(DIFFUSION), "planCaveatDiffusionGemmaEmpty");
+// Muse Glimmer: `none` документирован, но замер 2026-10-30 показал reasoning-канал
+// и на нём — значит off не выключатель, и статус обязан это сказать.
+assert.equal(thinkingPlanCaveat("meta/muse-glimmer-30b"), "planCaveatReasoningAlwaysOn");
 assert.equal(thinkingPlanCaveat(N3), undefined, "у nemotron оговорки нет");
 assert.equal(thinkingPlanCaveat(OTHER), undefined, "у чужого семейства оговорки нет");
 
@@ -210,6 +247,26 @@ assert.equal(thinkingPlanCaveat(OTHER), undefined, "у чужого семейс
 // Значения — из применённых оверрайдов, проверяем зеркало логики pi-ai.
 const KIMI_MAP = { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
 const GPTOSS_MAP = { off: null, minimal: "low", xhigh: "high", max: "high" } as Record<string, string | null>;
+// super-vl (pi 1.4.0, дефолт провайдера): карта из оверрайда, документированный
+// NIM набор none|low|high (research/14). Хук семейства nemotron его НЕ трогает —
+// enable_thinking=true рядом с reasoning_effort был бы вторым хозяином решения.
+const SUPER_VL = "nvidia/nemotron-3.5-super-vl-120b-a12b";
+const SUPER_VL_MAP = { off: "none", minimal: "low", low: "low", medium: "high", high: "high", xhigh: "high", max: "high" };
+assert.equal(thinkingPlan(SUPER_VL, "off"), undefined, "super-vl должна вести карта уровней, а не хук");
+const superVlPayload = transformRequest(
+  { model: SUPER_VL, messages: [], max_tokens: 32768 },
+  { modelId: SUPER_VL, thinkingLevel: "off" },
+);
+assert.equal(
+  superVlPayload.payload.chat_template_kwargs,
+  undefined,
+  "super-vl: хук не должен инжектить chat_template_kwargs — путь нативный (reasoning_effort)",
+);
+assert.equal(
+  wireThinkingPlan(SUPER_VL, "off", { reasoning: true, supportsReasoningEffort: true, thinkingLevelMap: SUPER_VL_MAP }),
+  'reasoning_effort="none"',
+  "super-vl off: статус-строка должна показывать выключение reasoning",
+);
 // kimi: off → "none" (не "off", который NIM отвергает 400), прочие идентично.
 assert.equal(nativeReasoningEffort("off", { supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }), "none");
 assert.equal(nativeReasoningEffort("low", { supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }), "low");

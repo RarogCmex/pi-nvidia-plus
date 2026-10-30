@@ -186,6 +186,95 @@ assert.equal(
   "v4.1-flash без supportsReasoningEffort:true — пи не шлёт reasoning_effort, и хук подставляет дефолт вместо уровня",
 );
 
+// ── 3d. nemotron-3.5-super-vl: мышление по документации NVIDIA, не по хуку ───
+// Встроенная карточка pi 1.4.0 несёт maxTokens 8192 и `supportsReasoningEffort:
+// false` без карты уровней, поэтому на провод не уходило НИЧЕГО, а мышление у
+// модели включено по умолчанию и его токены считаются в max_tokens: каждый
+// ответ заканчивался `finish_reason: "length"` на пустом content (сессия
+// 01a18c64, 2026-10-30, research/14). Документация NIM (docs.nvidia.com NIM 2.0.13
+// §Control Reasoning, docs.api.nvidia.com reference): `reasoning_effort` —
+// none|low|high (по умолчанию high), `none` выключает reasoning-токены, а
+// `max_tokens` принимает до 32768 при дефолте 16384. Поэтому путь здесь
+// нативный (pi сам шлёт reasoning_effort), а не хук nemotron-семейства:
+// `enable_thinking=true` рядом с `reasoning_effort` — два разных хозяина одного
+// решения.
+const superVl = overrides["nvidia/nemotron-3.5-super-vl-120b-a12b"];
+assert.ok(superVl, "оверрайд nvidia/nemotron-3.5-super-vl-120b-a12b пропал");
+assert.equal(
+  (superVl.compat as Record<string, unknown> | undefined)?.supportsReasoningEffort,
+  true,
+  "super-vl без supportsReasoningEffort:true — селектор уровней inert, reasoning_effort не уходит (регрессия к обрезаниям)",
+);
+const superVlMap = superVl.thinkingLevelMap as Record<string, unknown>;
+assert.ok(superVlMap, "super-vl: нет thinkingLevelMap");
+assert.equal(superVlMap.off, "none", 'super-vl: off должен быть "none" — только он выключает reasoning-токены');
+const SUPER_VL_EFFORTS = new Set(["none", "low", "medium", "high"]);
+for (const [level, value] of Object.entries(superVlMap)) {
+  assert.ok(
+    typeof value === "string" && SUPER_VL_EFFORTS.has(value),
+    `super-vl: уровень ${level} → «${String(value)}» вне документированного набора none|low|high`,
+  );
+}
+// 8192 из встроенной карточки — меньше серверного дефолта (16384): reasoning
+// съедал весь бюджет и ответ обрывался. Потолок карточки модели — 32768.
+assert.equal(superVl.maxTokens, 32768, "super-vl: maxTokens должен быть карточным потолком 32768, а не 8192 из pi");
+
+// ── 3e. meta/muse-glimmer-30b: нативное усилие + вендорный сэмплинг ─────────
+// Reference NVIDIA (`meta-muse-glimmer-30b-infer`, 2026-10-30): `reasoning_effort`
+// none|minimal|low|medium|high|max, дефолт high, reasoning идёт в том же
+// `max_tokens` (1–131072, дефолт 2048); сэмплинг — «the recommended pair is
+// temperature 0.95 with top_p 1.0. Greedy decoding measurably degrades it».
+const muse = overrides["meta/muse-glimmer-30b"];
+assert.ok(muse, "оверрайд meta/muse-glimmer-30b пропал");
+assert.equal(
+  (muse.compat as Record<string, unknown> | undefined)?.supportsReasoningEffort,
+  true,
+  "muse-glimmer без supportsReasoningEffort:true — селектор inert (ровно дефект super-vl)",
+);
+assert.deepEqual(
+  muse.samplingParams,
+  { temperature: 0.95, top_p: 1.0 },
+  "muse-glimmer: вендор рекомендует 0.95/1.0 и предупреждает о деградации на greedy",
+);
+const museMap = muse.thinkingLevelMap as Record<string, unknown>;
+assert.equal(museMap?.off, "none", 'muse-glimmer: off должен быть "none"');
+for (const [level, value] of Object.entries(museMap ?? {})) {
+  assert.ok(
+    typeof value === "string" && NIM_EFFORT_VARIANTS.has(value),
+    `muse-glimmer: уровень ${level} → «${String(value)}» вне none…max`,
+  );
+}
+
+// ── 3f. google/diffusiongemma-26b-a4b-it: оверрайда нет намеренно ────────
+// Пробы 2026-10-30 на hosted: без `enable_thinking=true` модель отдаёт пустой
+// content (1 токен) — и на дефолте, и с `enable_thinking=false`; с `true` —
+// отвечает. Поэтому мышление включается хуком принудительно (`transform.ts`,
+// как gemma-4 в обратную сторону): в оверрайде записи нет, селектор уровней
+// остаётся у встроенной карточки pi.
+assert.equal(
+  overrides["google/diffusiongemma-26b-a4b-it"],
+  undefined,
+  "diffusiongemma: мышление ведёт хук (принудительный enable_thinking=true), оверрайд не нужен",
+);
+
+// ── 3g. Оверрайд не может висеть на мёртвой модели ────────────────────────
+// Реальный дефект 2026-10-30: `z-ai/glm-5.3` получил 410 EOL 2026-10-28 и ушёл
+// из живого `/v1/models`, а оверрайд (и запись в `models`) продолжали его
+// «улучшать». Найден ручным аудитом — этот гейт ловит его автоматически.
+const { DEAD_MODELS } = (await import("../extensions/dead-models.ts")) as {
+  DEAD_MODELS: Record<string, string>;
+};
+const deadOverrides = Object.keys(overrides).filter((id) => id in DEAD_MODELS);
+assert.deepEqual(
+  deadOverrides,
+  [],
+  "оверрайд на мёртвой модели: уберите запись (иначе она влияет на id, которого нет в проде)",
+);
+const deadCards = (parsed.providers?.nvidia?.models ?? [])
+  .map((card) => card?.id)
+  .filter((id): id is string => typeof id === "string" && id in DEAD_MODELS);
+assert.deepEqual(deadCards, [], "своя карточка на мёртвой модели");
+
 rmSync(dir, { recursive: true, force: true });
 
 // ── 4. Файл остаётся машиночитаемым (без комментариев и хвостовых запятых) ────

@@ -41,6 +41,10 @@ export const DEAD_MODELS: Record<string, string> = {
   "deepseek-ai/deepseek-v4-pro-0813": "410 EOL 2026-09-14",
   "minimaxai/minimax-m3": "410 EOL 2026-09-09",
   "moonshotai/kimi-k3": "410 EOL 2026-10-15",
+  // 2026-10-30: keyless-ответ `application/problem+json` с точной датой (метод
+  // исследования 06, §1) — заодно id исчез из живого `/v1/models`; встроенная
+  // карточка pi 1.4.0 его ещё держит.
+  "z-ai/glm-5.3": "410 EOL 2026-10-28",
   // meta/muse-glimmer-30b воскресла: 200 на трёх пробах подряд 2026-10-12
   // (была «404 on probe 2026-09-18») — убрана из мёртвых, исследование 10, §2.
   // nvidia/nemotron-3.5-lightning-30b-a3b воскресла: 200 на пробах 2026-09-18 — убрана из мёртвых
