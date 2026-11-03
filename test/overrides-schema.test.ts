@@ -153,9 +153,12 @@ for (const [id, entry] of Object.entries(overrides)) {
 // NIM принимает только none/minimal/low/medium/high/xhigh/max (`off`→400),
 // поэтому off обязан маппиться в `none`, а не в `off`/`null`/`on`.
 // (Прежний носитель паттерна moonshotai/kimi-k3 — 410 EOL 2026-10-15, оверрайд
-// убран; карта переехала в собственную карточку m3.1-flash из `models`.)
-const m31 = (parsed.providers?.nvidia?.models ?? []).find((m) => m.id === "minimaxai/minimax-m3.1-flash");
-assert.ok(m31, "карточка minimaxai/minimax-m3.1-flash пропала из models");
+// убран; карта переехала в собственную карточку m3.1-flash из `models`. На pi
+// 1.5.0 id появился во встроенном каталоге, и запись в `models` стала бы заменой
+// встроенной карточки с потерей `inputLimits`, поэтому правки полей переехали в
+// `modelOverrides` — та же миграция, что была с kimi-k3 и deepseek-v4.1-flash.)
+const m31 = overrides["minimaxai/minimax-m3.1-flash"];
+assert.ok(m31, "оверрайд minimaxai/minimax-m3.1-flash пропал");
 assert.equal(
   (m31.compat as Record<string, unknown> | undefined)?.supportsReasoningEffort,
   true,

@@ -75,10 +75,11 @@ catalog stays authoritative. Two things are layered on top:
 
 **1. Metadata overrides** (`overrides/models.json`, applied to
 `~/.pi/agent/models.json` by `/nvidia-plus apply`, automatically on session
-start). Ten ids carry an override; eight of those add `reasoning: true` plus
+start). Eleven ids carry an override; eight of those add `reasoning: true` plus
 a `thinkingLevelMap` (one more carries a `thinkingFormat` instead, one a single
-`compat` flag), which is what makes pi's `--thinking <level>` selector reachable
-for them at all. Where the live card disagrees with pi's generated
+`compat` flag, and `minimaxai/minimax-m3.1-flash` adds a native-effort map plus
+sampling on top of pi 1.5.0's built-in card), which is what makes pi's
+`--thinking <level>` selector reachable for them at all. Where the live card disagrees with pi's generated
 catalog, the override also carries the corrected `contextWindow` (live-probe
 evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2):
 
@@ -94,6 +95,7 @@ evidence, [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) §2
 | `meta/muse-glimmer-30b` | native `reasoning_effort` (docs + probe 2026-10-30): `off`→none · `minimal`/`low`→low · `medium`→medium · `high`→high · `xhigh`/`max`→max; plus the vendor's sampling pair `temperature 0.95, top_p 1.0`. `none` still emits a short trace (69 vs 129 completion tokens at `high`) — `off` means *least*, and the status line says so |
 | `poolside/laguna-xs-2.1` | `reasoning: true` + reasoning-content compat flags |
 | `deepseek-ai/deepseek-v4.1-flash` | `supportsReasoningEffort: true` — the one field pi's own card (1.3.0+) lacks; the levels come from pi's map (`high`/`max`), and the family hook below moves the effort into `chat_template_kwargs` |
+| `minimaxai/minimax-m3.1-flash` | native `reasoning_effort` (probe 2026-10-23): `off`→none · `minimal`…`max`→identity; plus the vendor's sampling pair `temperature 1.0, top_p 0.95`. pi 1.5.0 added the id to its built-in catalog, so the deltas live here rather than in a `models` card |
 
 Three Nemotron ids additionally carry **vendor-recommended sampling**
 (`samplingParams`, pi ≥ 1.0.2): `nemotron-3-super-120b-a12b` and
@@ -105,8 +107,8 @@ cards say these hold for reasoning, tool calling, and chat alike), while
 probed live (including `top_k`); evidence in
 [research 11](research/11-pi-1.2-catalog-fields-probes.md) §1.
 
-**Two curated cards of our own** (`models` entries — these ids are live on NIM
-but absent from pi 1.4.0's built-in catalog, so without a card they are not
+**One curated card of our own** (`models` entry — this id is live on NIM
+but absent from pi 1.5.0's built-in catalog, so without a card it is not
 selectable at all; catalog sync 2026-10-23):
 
 - `nvidia/nemotron-3.5-bolt-e4b` — Nemotron 3.5 edge model (Gemma-4-E4B base).
@@ -117,15 +119,17 @@ selectable at all; catalog sync 2026-10-23):
   `reasoning_content`; top-level `reasoning_effort` is a 400, same as the rest
   of the family (`enable_thinking=true` without `low_effort` — family
   extrapolation, marked as a hypothesis in the code).
-- `minimaxai/minimax-m3.1-flash` — MiniMax M3.1 Flash (text+image, 262K
-  context, sampling `1.0 / 0.95` per the build card). Thinking is always on:
-  `chat_template_kwargs.thinking_mode` is silently ignored (probe 2026-10-23),
-  but top-level `reasoning_effort` is validated (`bogus`→400, `off`→400,
-  `low`/`high` verified to scale the reasoning channel) — so the card is
-  native-path, same shape kimi-k3 had: `supportsReasoningEffort: true` with an
-  identity map, `off`→`none`. Whether `none` fully silences the interleaved
-  thinking is not verified (rate-limited probe) — treat `off` as "least
-  reasoning", not a guaranteed off-switch.
+**`minimaxai/minimax-m3.1-flash` is override-only since pi 1.5.0.** pi 1.5.0
+added the id to its built-in nvidia catalog, so a `models` entry would now
+replace that card wholesale and drop its `inputLimits` image-resize box. The
+deltas live in `modelOverrides` instead: `supportsReasoningEffort: true`, the
+identity `thinkingLevelMap` with `off`→`none`, the vendor sampling pair, and
+the display name. The measured behaviour is unchanged: thinking is always on,
+`chat_template_kwargs.thinking_mode` is silently ignored (probe 2026-10-23),
+but top-level `reasoning_effort` is validated (`bogus`→400, `off`→400,
+`low`/`high` verified to scale the reasoning channel). Whether `none` fully
+silences the interleaved thinking is not verified (rate-limited probe) — treat
+`off` as "least reasoning", not a guaranteed off-switch.
 
 **No card of our own for `deepseek-ai/deepseek-v4.1-flash`.** pi's catalog now
 ships a full card for that id (checked in the pi 1.3.0 and 1.4.0 catalogs: 1M
@@ -533,13 +537,30 @@ live on NIM — its override stays and applies again as soon as
 2026-10-15 — its override was removed and the id joined the dead-model list). With that, typecheck (tsc 7.1.0-dev
 locally; CI pins 5.9.3) plus all 27 test files are green, Node 26.10. Loading on
 1.0.0, 1.0.4, 1.2.0 and 1.4.0 was checked in an isolated `PI_CODING_AGENT_DIR`:
-`models.json` (nine overrides plus two curated cards for ids outside pi's
-built-in catalog — eleven and two since the 2026-10-30 card audit) and `nvidia-plus-models.json` appear there and
+`models.json` (eleven overrides plus one curated card for an id outside pi's
+built-in catalog) and `nvidia-plus-models.json` appear there and
 `--list-models nvidia` prints the built-in catalog with and without the extension
 (19=19 on 1.0.0; 21=21 on 1.0.4; 21=21 on 1.4.0, where the two lists differ in
 exactly one cell — `nemotron-3.5-lightning-30b-a3b`'s context, 262.1K built-in vs
 1M from our override; pi's own nvidia catalog grew between those hosts, and this
 extension is hook-only, so the list is not the signal).
+
+Re-verified on **pi 1.5.0** (2026-11-03): typecheck (tsc 5.9.3) plus all 27 test
+files green, Node 26.10. The 1.5.0 host catalog added
+`minimaxai/minimax-m3.1-flash` to the built-in nvidia provider, which turned our
+own `models` entry into a shadow that would replace the built-in card and drop
+its `inputLimits` image-resize box; the card's deltas (`supportsReasoningEffort`,
+`thinkingLevelMap`, `samplingParams`, display name) moved to `modelOverrides`,
+the same migration already made for `kimi-k3` and `deepseek-v4.1-flash`.
+Loading in an isolated `PI_CODING_AGENT_DIR` with a dead key prints 22 nvidia
+ids, including `minimaxai/minimax-m3.1-flash` at 262.1K/262.1K with thinking.
+pi 1.5.0 reads the root `CHANGELOG.md` by default; `pi.changelogPath` is not
+set. The rest of the 1.5.0 feature matrix does not reach this extension: no
+tools are registered (the pi-schema change is moot),
+`Usage.cost.totalFromProvider`/`responseModel` are host-filled,
+`keyText()`/`keyHint()` need a custom tool renderer, `blocked` on
+`ctx.ui.custom()` needs an inline custom UI, `pi.exec()` is never called, and
+the GPT-6.1 Terra / models.dev v2 / default-model swaps are host catalogs.
 
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
 devDependency (`link-pi.mjs` links pi's packages and undici), so TypeScript must
