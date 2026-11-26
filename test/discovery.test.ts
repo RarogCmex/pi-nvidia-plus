@@ -69,6 +69,8 @@ import {
     // completion-only семейство: chat-роута нет вообще, keyless-проба даёт
     // `404 page not found` — исследование 06, §1–2, проба 2026-10-05
     "bigcode/starcoder2-15b",
+    // NER / извлечение PII: 422 `invalid extraction request` — исследование 16, §3
+    "fastino/gliner2-pii",
   ];
   for (const id of nonChat) assert.equal(isChatModel(id), false, `должен быть отсеян: ${id}`);
 

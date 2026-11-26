@@ -3,30 +3,17 @@
   "providers": {
     "nvidia": {
       "modelOverrides": {
-        "nvidia/nemotron-3-super-120b-a12b": {
-          "reasoning": true,
-          "contextWindow": 1000000,
-          "samplingParams": { "temperature": 1.0, "top_p": 0.95 },
-          "thinkingLevelMap": {
-            "off": "off",
-            "minimal": "low",
-            "low": "low",
-            "medium": "on",
-            "high": "on",
-            "xhigh": "on",
-            "max": "on"
-          }
-        },
         "nvidia/nemotron-3-ultra-550b-a55b": {
           "reasoning": true,
+          "compat": { "supportsReasoningEffort": true },
           "thinkingLevelMap": {
-            "off": "off",
-            "minimal": "low",
+            "off": "none",
+            "minimal": "minimal",
             "low": "low",
-            "medium": "on",
-            "high": "on",
-            "xhigh": "on",
-            "max": "on"
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
           }
         },
         "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning": {
@@ -49,14 +36,15 @@
           "reasoning": true,
           "contextWindow": 1000000,
           "samplingParams": { "temperature": 1.0, "top_p": 0.95 },
+          "compat": { "supportsReasoningEffort": true },
           "thinkingLevelMap": {
-            "off": "off",
-            "minimal": "low",
+            "off": "none",
+            "minimal": "minimal",
             "low": "low",
-            "medium": "on",
-            "high": "on",
-            "xhigh": "on",
-            "max": "on"
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
           }
         },
         "nvidia/nemotron-3.5-super-vl-120b-a12b": {
@@ -65,22 +53,12 @@
           "compat": { "supportsReasoningEffort": true },
           "thinkingLevelMap": {
             "off": "none",
-            "minimal": "low",
+            "minimal": "minimal",
             "low": "low",
             "medium": "medium",
             "high": "high",
-            "xhigh": "high",
-            "max": "high"
-          }
-        },
-        "openai/gpt-oss-20b": {
-          "reasoning": true,
-          "compat": { "supportsReasoningEffort": true },
-          "thinkingLevelMap": {
-            "off": null,
-            "minimal": "low",
-            "xhigh": "high",
-            "max": "high"
+            "xhigh": "xhigh",
+            "max": "max"
           }
         },
         "poolside/laguna-xs-2.1": {
@@ -93,9 +71,6 @@
             "requiresReasoningContentOnAssistantMessages": true
           }
         },
-        "deepseek-ai/deepseek-v4.1-flash": {
-          "compat": { "supportsReasoningEffort": true }
-        },
         "z-ai/glm-5.3-flash": {
           "reasoning": true,
           "thinkingLevelMap": {
@@ -106,20 +81,6 @@
             "high": "on",
             "xhigh": "on",
             "max": "on"
-          }
-        },
-        "meta/muse-glimmer-30b": {
-          "reasoning": true,
-          "compat": { "supportsReasoningEffort": true },
-          "samplingParams": { "temperature": 0.95, "top_p": 1.0 },
-          "thinkingLevelMap": {
-            "off": "none",
-            "minimal": "minimal",
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "max",
-            "max": "max"
           }
         },
         "minimaxai/minimax-m3.1-flash": {

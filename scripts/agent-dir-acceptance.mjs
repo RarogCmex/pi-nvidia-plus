@@ -22,12 +22,15 @@
  *      источником, а не захардкоженная константа: добавили оверрайд — приёмка
  *      по-прежнему проходит, потеряли при применении — покраснеет);
  *   4. дефолтный каталог (`$HOME/.pi/agent`) не изменился: ни новых файлов, ни
- *      изменённых (снимок имя+размер+mtime до и после).
+ *      изменённых конфигов (снимок имя+размер+mtime до и после; транскрипты
+ *      параллельных живых сессий в `sessions/` / `subagent-artifacts/` и кэши
+ *      `*.mdb`, `*-cache*`, `*.log` игнорируются, а `models.json` и леджер
+ *      проверяются строго).
  *
  * `--offline`: применение оверрайдов сети не требует. Измерено 2026-10-01 —
  * вывод `pi --list-models nvidia` с `--offline` и без него совпадает побайтово,
- * файлы те же (10 оверрайдов, `enabled: true`). Детерминированный шаг не зависит
- * от доступности шлюза с раннера и не тратит ключ.
+ * файлы те же (`enabled: true`). Детерминированный шаг не зависит от
+ * доступности шлюза с раннера и не тратит ключ.
  *
  * Использование (каталог — одноразовый, не настоящий `~/.pi/agent`):
  *   PI_CODING_AGENT_DIR=$(mktemp -d) node scripts/agent-dir-acceptance.mjs
@@ -94,14 +97,21 @@ console.log(`  pi:              ${PI_BIN}`);
 
 // --- снимок дефолтного каталога ----------------------------------------------
 
+// Игнорируем шум параллельных живых сессий/сабагентов pi (транскрипты и кэши),
+// оставляя под строгим контролем models.json, леджеры, настройки и всё прочее.
+const IGNORED_RUNTIME_RE =
+  /^[/\\](?:sessions|pi-subagents|subagent-artifacts|web-search-cache|fff)[/\\]|(?:\.mdb|-cache[^/\\]*|\.log|\.lock|run-history\.jsonl|\.DS_Store)$/i;
+
 function snapshot(dir) {
   if (!existsSync(dir)) return new Map();
   const out = new Map();
   for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const full = join(entry.parentPath ?? entry.path, entry.name);
+    const rel = full.slice(dir.length);
+    if (IGNORED_RUNTIME_RE.test(rel)) continue;
     const st = statSync(full);
-    out.set(full.slice(dir.length), `${st.size}:${Math.floor(st.mtimeMs)}`);
+    out.set(rel, `${st.size}:${Math.floor(st.mtimeMs)}`);
   }
   return out;
 }

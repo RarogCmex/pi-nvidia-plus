@@ -109,7 +109,7 @@ assert.ok(handlers["model_select"]?.length, "model_select подписан");
 
 /* ── 4. Семейство хука (nemotron) показывает план хука, не reasoning_effort ── */
 {
-  const nemotron = { provider: "nvidia", id: "nvidia/nemotron-3-super-120b-a12b", reasoning: true };
+  const nemotron = { provider: "nvidia", id: "nvidia/nemotron-3.5-bolt-e4b", reasoning: true };
   statuses.length = 0;
   await fire("model_select", { model: nemotron }, makeCtx(nemotron, "off"));
   const line = statuses[statuses.length - 1];

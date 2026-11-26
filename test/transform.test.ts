@@ -9,8 +9,18 @@ import assert from "node:assert/strict";
 import { transformRequest, thinkingPlan, thinkingPlanCaveat, nativeReasoningEffort, wireThinkingPlan, type Payload } from "../extensions/transform.ts";
 
 const M3 = "minimaxai/minimax-m3";
-const N3 = "nvidia/nemotron-3-super-120b-a12b";
+// Семейство хука по ключу чат-шаблона (пробы 2026-10-23/тикет 19);
+// nemotron-3-super-120b-a12b — 410 EOL 2026-10-03 (исследование 16, §2), а
+// nemotron-3.5-lightning/-super-vl и ultra с 2026-11-26 ведёт нативный
+// reasoning_effort (NEMOTRON_NATIVE, исследование 16, §5).
+const N3 = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
+const BOLT = "nvidia/nemotron-3.5-bolt-e4b";
 const LIGHTNING = "nvidia/nemotron-3.5-lightning-30b-a3b";
+const NATIVE = [
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "nvidia/nemotron-3.5-lightning-30b-a3b",
+  "nvidia/nemotron-3.5-super-vl-120b-a12b",
+];
 const OTHER = "moonshotai/kimi-k3";
 
 function kwargs(p: Payload): Record<string, unknown> {
@@ -34,7 +44,7 @@ for (const [level, mode] of minimaxRows) {
 }
 
 // 2. Неметрон 3.x/3.5: off → enable_thinking=false; minimal/low → +low_effort; остальное → enable_thinking=true.
-for (const modelId of [N3, LIGHTNING]) {
+for (const modelId of [N3, BOLT]) {
   const off = transformRequest({ model: modelId }, { modelId, thinkingLevel: "off" });
   assert.equal(kwargs(off.payload).enable_thinking, false, `${modelId} off`);
   assert.ok(!("low_effort" in kwargs(off.payload)), `${modelId} off: low_effort не удалён`);
@@ -239,7 +249,7 @@ assert.equal(thinkingPlanCaveat(DIFFUSION), "planCaveatDiffusionGemmaEmpty");
 // Muse Glimmer: `none` документирован, но замер 2026-10-30 показал reasoning-канал
 // и на нём — значит off не выключатель, и статус обязан это сказать.
 assert.equal(thinkingPlanCaveat("meta/muse-glimmer-30b"), "planCaveatReasoningAlwaysOn");
-assert.equal(thinkingPlanCaveat(N3), undefined, "у nemotron оговорки нет");
+assert.equal(thinkingPlanCaveat(N3), undefined, "у nemotron-nano-omni оговорки нет");
 assert.equal(thinkingPlanCaveat(OTHER), undefined, "у чужого семейства оговорки нет");
 
 // 13. Нативный путь пи (пункт 6 исследования 06, §5.4): что реально уходит в NIM
@@ -247,11 +257,14 @@ assert.equal(thinkingPlanCaveat(OTHER), undefined, "у чужого семейс
 // Значения — из применённых оверрайдов, проверяем зеркало логики pi-ai.
 const KIMI_MAP = { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
 const GPTOSS_MAP = { off: null, minimal: "low", xhigh: "high", max: "high" } as Record<string, string | null>;
-// super-vl (pi 1.4.0, дефолт провайдера): карта из оверрайда, документированный
-// NIM набор none|low|high (research/14). Хук семейства nemotron его НЕ трогает —
-// enable_thinking=true рядом с reasoning_effort был бы вторым хозяином решения.
+// super-vl (pi 1.4.0–1.6.1, дефолт провайдера): карта из оверрайда. Документация NIM
+// (research/14) обещает none|low|high; ретест 2026-11-26 (research/16, §5)
+// показал, что шкала на проводе — полная none…max: `low`/`medium`/`high` → 200, а
+// `off` и `bogus` → 400. Карта растянута на ту же шкалу, иначе уровень `low` в UI
+// молча уезжал бы в `high`. Хук семейства nemotron его НЕ трогает — ни ключом
+// чат-шаблона (он тут не выключатель, §5), ни чем-либо ещё.
 const SUPER_VL = "nvidia/nemotron-3.5-super-vl-120b-a12b";
-const SUPER_VL_MAP = { off: "none", minimal: "low", low: "low", medium: "high", high: "high", xhigh: "high", max: "high" };
+const SUPER_VL_MAP = { off: "none", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" };
 assert.equal(thinkingPlan(SUPER_VL, "off"), undefined, "super-vl должна вести карта уровней, а не хук");
 const superVlPayload = transformRequest(
   { model: SUPER_VL, messages: [], max_tokens: 32768 },
@@ -267,6 +280,39 @@ assert.equal(
   'reasoning_effort="none"',
   "super-vl off: статус-строка должна показывать выключение reasoning",
 );
+
+// 13b. Семейство 3.5/ultra — ключ чат-шаблона разжалован из выключателя (ретест
+// 2026-11-26, research/16, §5): plain-запрос отдал reasoning-канал (мышление
+// включено дефолтом), `enable_thinking` принимается 200, но reasoning-токенов не
+// меняет ни в true, ни в false. Хук не должен слать его ни на каком уровне —
+// иначе статус показывал бы ручку, которой нет, а карта осталась бы в тени.
+for (const id of NATIVE) {
+  assert.equal(thinkingPlan(id, "off"), undefined, `${id}: хук не должен рулить reasoning`);
+  assert.equal(thinkingPlan(id, "high"), undefined, `${id}: хук не должен рулить reasoning`);
+  assert.equal(
+    thinkingPlanCaveat(id),
+    "planCaveatNemotronNativeEffort",
+    `${id}: статус обязан сказать, что enable_thinking тут не выключатель`,
+  );
+  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+    const r = transformRequest({ model: id }, { modelId: id, thinkingLevel: level });
+    assert.equal(kwargs(r.payload).enable_thinking, undefined, `${id} ${level}: enable_thinking не шлётся`);
+    assert.ok(!("low_effort" in kwargs(r.payload)), `${id} ${level}: low_effort не шлётся`);
+    const wire = wireThinkingPlan(id, level, {
+      reasoning: true,
+      supportsReasoningEffort: true,
+      thinkingLevelMap: SUPER_VL_MAP,
+    });
+    assert.equal(
+      wire,
+      `reasoning_effort="${level === "off" ? "none" : level}"`,
+      `${id} ${level}: нативный effort — единственный хозяин`,
+    );
+  }
+}
+// bolt/nano-omni ключ по-прежнему держат: оговорки у них нет.
+assert.equal(thinkingPlanCaveat(BOLT), undefined, "bolt-e4b ведёт ключ — оговорка не нужна");
+assert.equal(thinkingPlan(BOLT, "high"), "chat_template_kwargs.enable_thinking=true", "bolt high ведёт ключ");
 // kimi: off → "none" (не "off", который NIM отвергает 400), прочие идентично.
 assert.equal(nativeReasoningEffort("off", { supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }), "none");
 assert.equal(nativeReasoningEffort("low", { supportsReasoningEffort: true, thinkingLevelMap: KIMI_MAP }), "low");

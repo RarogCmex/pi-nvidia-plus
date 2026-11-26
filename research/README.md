@@ -25,32 +25,28 @@
 | [`13-proxy-tunnel-rejection-2026-10-23.md`](13-proxy-tunnel-rejection-2026-10-23.md) | 407-стена авторизации прокси — это отказ CONNECT (`unreachable`), а не «не определён»: undici отдаёт его как `UND_ERR_ABORTED` без `statusCode`/`cause`, распознаём по тексту; 8 выходов пула из 29 были «неизвестны», а на деле не работали; сводка `proxy check` теперь печатает причину по каждому не-ok выходу | 2026-10-23 | живая диагностика пула (29 выходов), локальный прокси с 407 на CONNECT, чтение undici 8.10.2 |
 | [`14-nemotron-super-vl-truncation-2026-10-30.md`](14-nemotron-super-vl-truncation-2026-10-30.md) | «Response was truncated before completion» на дефолтной модели pi 1.4.0: карточка хоста даёт `maxTokens` 8192 и `supportsReasoningEffort: false` без карты уровней, а у модели reasoning включён по умолчанию и его токены идут в тот же бюджет — каждый ответ кончался `length` на пустом `content` (89 раз подряд, продлевал `pi-retry`); лечится нативным `reasoning_effort` (off→none) плюс `maxTokens` 32768 по документации NIM | 2026-10-30 | разбор записей живой сессии pi + встроенная карточка pi 1.4.0/pi-ai + документация NVIDIA (NIM 2.0.13, reference модели, build-карточка); живых проб не было — что осталось непроверенным, §5 |
 | [`15-catalog-card-audit-2026-10-30.md`](15-catalog-card-audit-2026-10-30.md) | аудит встроенных карточек pi 1.4.0 против документации вендоров: у всех 21 id в каталоге NIM мышление не управляется (нет карты уровней + `supportsReasoningEffort:false`); найдены три живые модели без нашего покрытия (muse-glimmer — native `reasoning_effort` none…max + вендорный сэмплинг 0.95/1.0, diffusiongemma — только `chat_template_kwargs.enable_thinking`, step-5 — reasoning не выключается и `enable_thinking=false` запрещён вендором), ошибка в GLM-хуке (reasoning не гасится, нужен `clear_thinking=true`, шкала low|high|max) и оверрайд на мёртвом `z-ai/glm-5.3` (410 EOL 2026-10-28); класс «maxTokens == contextWindow» снят — pi-ai клампит на каждом запросе | 2026-10-30 | keyless `GET /v1/models` и keyless `POST /v1/chat/completions` (без ключа, без квоты), reference-схемы docs.api.nvidia.com для hosted-эндпоинта, встроенный каталог pi 1.4.0/pi-ai; новые гейты в тестах (оверрайд не может ссылаться на мёртвый id) |
+| [`16-catalog-sync-2026-11-26.md`](16-catalog-sync-2026-11-26.md) | синхронизация каталога NIM 2026-11-26 и ретест Nemotron 3.5 / 3-ultra: `enable_thinking` не выключает reasoning на `ultra`/`lightning`/`super-vl` → нативный `reasoning_effort` (`none…max`, `off`→400, `NEMOTRON_NATIVE_EFFORT`); 17 «404 in every probe» получили точные даты 410 EOL; `nemotron-3-super-120b-a12b` (2026-10-03), `diffusiongemma` (2026-11-12), `deepseek-v4.1-flash` (2026-11-16), `gpt-oss-20b` (2026-11-18) и `muse-glimmer-30b` (2026-11-24) ушли в `DEAD_MODELS`; `fastino/gliner2-pii` отсеян как NER (422), `kimi-k3.1-pro` висит, `mistral-large-4-1t-a52b` без потолка | 2026-11-26 | keyless `GET /v1/models` (30 id) + keyless `POST /v1/chat/completions` (410 EOL), малые авторизованные пробы и 400-оракул `max_tokens`, сверка с каталогом pi 1.6.1 (11 id) |
 | [`goal.md`](goal.md) | **исторический** план работ: приоритеты P0…P5, открытые вопросы, критерии приёмки | 2026-08 | — |
 
 ## Как это читать
 
 **Версии.** Разборы писались против pi 0.73 (установленный
 `@earendil-works/pi-coding-agent` и его `pi-ai` на момент написания). Само
-расширение в настоящий момент проверено против **pi 0.87.1 / pi-ai 0.87.1 /
-undici 8.10.2 / Node 26**, а с 2026-09-30 также против **pi 0.99.1**, с
-2026-10-03 против **pi 1.0.0** (бандл нёс те же undici 8.10.2 и
-`@types/node` 22.19.19), с 2026-10-12 против **pi 1.2.0** (undici всё ещё
-8.10.2, `@types/node` 26.6.5) и с 2026-10-22 против **pi 1.3.0 / 1.4.0**
-(undici по-прежнему 8.10.2, `@types/node` 26.6.5, `engines.node` тот же):
-typecheck и все 27 файлов тестов зелёные, а
-загрузка расширения на 1.0.0, 1.2.0 и 1.4.0 проверена в изолированном
-`PI_CODING_AGENT_DIR`. Пробы, сделанные позже даты файла, в эти разборы не
-вносились — они записаны в комментариях кода (например, `DEAD_MODELS` в
-`extensions/pi-nvidia-plus.ts` несёт дату каждой пробы). Две поправки к тому,
-что ниже датировано старым хостом: с pi 1.4.0 атрибуционные заголовки
-(включая NIM) проставляет client identity в `pi-ai` (`getIdentityHeaders`), а
-не `provider-attribution.js` + `transformHeaders` из `01` §3, и хук
+расширение в настоящий момент проверено против **pi 1.6.1 / pi-ai 1.6.1 /
+undici 8.10.2 / Node 26.10** (а до этого на 0.87.1, 0.99.1, 1.0.0, 1.2.0,
+1.3.0, 1.4.0 и 1.5.0): typecheck и все 27 файлов тестов зелёные, а
+загрузка расширения проверена в изолированном `PI_CODING_AGENT_DIR`. Пробы,
+сделанные позже даты файла, в эти разборы не вносились — они записаны в
+комментариях кода (например, `DEAD_MODELS` в `extensions/dead-models.ts`)
+и в последующих файлах (`12`–`16`). Две поправки к тому, что ниже датировано
+старым хостом: с pi 1.4.0 атрибуционные заголовки (включая NIM) проставляет
+client identity в `pi-ai` (`getIdentityHeaders`), а не
+`provider-attribution.js` + `transformHeaders` из `01` §3, и хук
 `before_provider_headers` их больше не видит; встроенный каталог nvidia на
-1.4.0 — 21 id, в нём появилась полная карточка
-`deepseek-ai/deepseek-v4.1-flash` и новые `nvidia/nemotron-3.5-super-vl-120b-a12b`
-(дефолт хоста) и `stepfun-ai/step-5-preview`, а
-`nvidia/nemotron-3-super-120b-a12b` с `moonshotai/kimi-k3` из него ушли —
-таблицы `02`, `10` и `11` читай с этой поправкой.
+**1.6.1** — **11 id** (дефолт хоста по-прежнему
+`nvidia/nemotron-3.5-super-vl-120b-a12b`), в нём остались только актуальные
+на ноябрь 2026 модели — таблицы `02`, `10`, `11` и `15` читай с этой
+поправкой.
 
 **Цитаты путей и номера строк.** Файлы `01`, `04`, `05-pi-internals` цитируют
 скомпилированный `dist/` pi по номерам строк. Обозначение `$PI` — каталог

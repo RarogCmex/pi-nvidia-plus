@@ -21,9 +21,13 @@ export interface TransformResult {
 // ── Thinking-маппинги, верифицированные живыми пробами (исследование 03) ────
 const MINIMAX_M3 = "minimaxai/minimax-m3";
 const NEMOTRON_THINKING_MODELS = new Set([
-  "nvidia/nemotron-3-super-120b-a12b",
-  "nvidia/nemotron-3-ultra-550b-a55b",
-  "nvidia/nemotron-3.5-lightning-30b-a3b",
+  // Этот набор — «хук по ключу»: id, для которых доказано, что
+  // `chat_template_kwargs.enable_thinking` вообще работает. С 2026-11-26 это
+  // bolt-e4b (проба 2026-10-23) и nemotron-3-nano-omni (проба тикета 19);
+  // ultra / lightning / super-vl ключ 400 не отвергают, но reasoning им НЕ
+  // включают — их ведёт нативный `reasoning_effort` (NEMOTRON_NATIVE_EFFORT,
+  // исследование 16, §5). `nvidia/nemotron-3-super-120b-a12b` — 410 EOL
+  // 2026-10-03, оверрайда больше нет, хук тоже не нужен.
   // Живые пробы 2026-08-30: chat_template_kwargs.enable_thinking, low_effort и
   // top-level reasoning_effort/reasoning_budget принимаются; `enable_thinking`
   // вне chat_template_kwargs отвергается 400.
@@ -95,6 +99,10 @@ function minimaxThinkingMode(level: string): string {
  * `thinkingPlanCaveat`, который переводит i18n-слой.
  */
 export function thinkingPlan(modelId: string, level: string): string | undefined {
+  // Нативный путь раньше семейного: `wireThinkingPlan` спрашивает хук первым, и
+  // для этих id он обязан вернуть `undefined`, иначе статус показал бы
+  // `enable_thinking` (который ничего не делает), а не `reasoning_effort`.
+  if (NEMOTRON_NATIVE_EFFORT.has(modelId)) return undefined;
   if (DIFFUSIONGEMMA.test(modelId)) {
     return "chat_template_kwargs.enable_thinking=true";
   }
@@ -128,8 +136,17 @@ export function thinkingPlan(modelId: string, level: string): string | undefined
  */
 export function thinkingPlanCaveat(
   modelId: string,
-): "planCaveatGemma4Hangs" | "planCaveatReasoningAlwaysOn" | "planCaveatDiffusionGemmaEmpty" | undefined {
+):
+  | "planCaveatGemma4Hangs"
+  | "planCaveatReasoningAlwaysOn"
+  | "planCaveatDiffusionGemmaEmpty"
+  | "planCaveatNemotronNativeEffort"
+  | undefined {
   if (GEMMA4.test(modelId)) return "planCaveatGemma4Hangs";
+  // Ключ семейства nemotron ещё умеет выключать мышление на bolt/nano-omni;
+  // на 3.5/ultra он выключателем НЕ является, и оговорка называет единственного
+  // хозяина — reasoning_effort (ретест 2026-11-26, исследование 16, §5).
+  if (NEMOTRON_NATIVE_EFFORT.has(modelId)) return "planCaveatNemotronNativeEffort";
   if (DIFFUSIONGEMMA.test(modelId)) return "planCaveatDiffusionGemmaEmpty";
   if (GLM.test(modelId) || MUSE_GLIMMER.test(modelId)) return "planCaveatReasoningAlwaysOn";
   return undefined;
@@ -255,6 +272,26 @@ function applyThinking(payload: Payload, modelId: string, level: string): boolea
   }
   return false;
 }
+
+/**
+ * Nemotron 3.5 / 3-ultra — ключ `chat_template_kwargs.enable_thinking` больше не
+ * выключатель (ретест 2026-11-26, исследование 16, §5): plain-запрос отдал
+ * reasoning-канал, то есть мышление включено дефолтом; ключ принимается (200), но
+ * reasoning-токенов не меняет — ни в `true`, ни в `false`. Раньше `false` гасило
+ * его (проба 2026-10-23 — на bolt, по ней и построен хук выше). Единственная
+ * работающая ручка на этих трёх id — нативный top-level `reasoning_effort`:
+ * `none` гасит канал, `bogus` даёт 400 (то есть он валидируется), шкала NIM —
+ * `none…max`, значение `off` сервер отвергает 400.
+ *
+ * Поэтому в `overrides/models.json` у этих id своя карта уровней (`off`→`none`),
+ * и это единственный хозяин решения: `wireThinkingPlan` показывает в статусе
+ * `reasoning_effort`, а хук семейства nemotron сюда полей не кладёт.
+ */
+const NEMOTRON_NATIVE_EFFORT = new Set([
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "nvidia/nemotron-3.5-lightning-30b-a3b",
+  "nvidia/nemotron-3.5-super-vl-120b-a12b",
+]);
 
 /**
  * DeepSeek V4: пи шлёт `thinking` и `reasoning_effort` top-level, NIM требует их в

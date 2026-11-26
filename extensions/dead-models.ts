@@ -6,7 +6,13 @@
  * повторена авторизованной пробой max_tokens=16 — все подтверждены;
  * meta/muse-glimmer-30b воскресла — 200 трижды подряд, убрана из таблицы;
  * ретест 2026-10-23: все «404 in every probe» снова 404 авторизованно,
- * 410-записи сверены keyless-оракулом; kimi-k3 получила явный 410).
+ * 410-записи сверены keyless-оракулом; kimi-k3 получила явный 410;
+ * ретест 2026-11-26: 17 прежних «404 in every probe» отвечают 410 с точной
+ * датой снятия (2026-11-15 у большинства, nemotron-nano-3 — 2026-09-01),
+ * дата перебита оракулом; ушли из живого каталога и получили явный 410
+ * nvidia/nemotron-3-super-120b-a12b (2026-10-03), diffusiongemma-26b-a4b-it
+ * (2026-11-12), deepseek-v4.1-flash (2026-11-16), gpt-oss-20b (2026-11-18) и
+ * muse-glimmer-30b (2026-11-24) — исследование 16, §2).
  *
  * Вынесен из входной точки, чтобы `scripts/discover-models.mjs` импортировал
  * таблицу напрямую (type-stripping, Node ≥ 22.19), а не держал копию.
@@ -48,33 +54,45 @@ export const DEAD_MODELS: Record<string, string> = {
   // meta/muse-glimmer-30b воскресла: 200 на трёх пробах подряд 2026-10-12
   // (была «404 on probe 2026-09-18») — убрана из мёртвых, исследование 10, §2.
   // nvidia/nemotron-3.5-lightning-30b-a3b воскресла: 200 на пробах 2026-09-18 — убрана из мёртвых
+  "nvidia/nemotron-3-super-120b-a12b": "410 EOL 2026-10-03",
+  // 2026-11-26: ноябрьские отставки (keyless POST → 410, ушли из /v1/models и каталога pi 1.6.1).
+  "google/diffusiongemma-26b-a4b-it": "410 EOL 2026-11-12",
+  "deepseek-ai/deepseek-v4.1-flash": "410 EOL 2026-11-16",
+  "openai/gpt-oss-20b": "410 EOL 2026-11-18",
+  "meta/muse-glimmer-30b": "410 EOL 2026-11-24",
   "google/gemma-3-4b-it": "404 in every probe",
   "google/gemma-3-12b-it": "404 in every probe",
-  "mistralai/mistral-7b-instruct-v0.3": "404 in every probe",
-  "moonshotai/kimi-k2.6": "404 in every probe",
   "nvidia/cosmos-reason2-8b": "404 in every probe",
-  "nvidia/llama-3.1-nemotron-70b-instruct": "404 in every probe",
-  "nvidia/llama-3.1-nemotron-ultra-253b-v1": "404 in every probe",
+  // 2026-11-26: keyless-оракул дал точную дату (410 + `application/problem+json`)
+  // — «404 in every probe» заменён на неё. google/gemma-3-* и
+  // nvidia/cosmos-reason2-8b остались 404: оракул на них отвечает 401, то есть
+  // HTTP-роут жив, а вызов падает на слое NVCF (исследование 06, §6.2).
+  "mistralai/mistral-7b-instruct-v0.3": "410 EOL 2026-11-15",
+  "moonshotai/kimi-k2.6": "410 EOL 2026-11-15",
+  "nvidia/llama-3.1-nemotron-70b-instruct": "410 EOL 2026-11-15",
+  "nvidia/llama-3.1-nemotron-ultra-253b-v1": "410 EOL 2026-11-15",
   // Вне базы пи (аудит 02; нужно для живого обнаружения — не добавлять мёртвых)
   // Пробы 2026-09-18: наши бывшие оверрайды, померли
   "nvidia/nemotron-3-nano-30b-a3b": "410 EOL 2026-09-01",
   "openai/gpt-oss-120b": "410 EOL 2026-09-03",
   "stepfun-ai/step-3.7-flash": "410 EOL 2026-08-28",
-  "01-ai/yi-large": "404 in every probe (catalog audit 2026-08-26)",
-  "ai21labs/jamba-1.5-large-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "databricks/dbrx-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  // Первичный аудит 2026-08-26 видел 404 — то есть модель была снята раньше
+  // даты публичного EOL; в живом `/v1/models` её уже нет.
+  "01-ai/yi-large": "410 EOL 2026-11-15",
+  "ai21labs/jamba-1.5-large-instruct": "410 EOL 2026-11-15",
+  "databricks/dbrx-instruct": "410 EOL 2026-11-15",
   "deepseek-ai/deepseek-v4-flash": "410 EOL 2026-08-07",
   "deepseek-ai/deepseek-v4-pro": "410 EOL 2026-08-07",
-  "microsoft/phi-3-vision-128k-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "microsoft/phi-3.5-moe-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/codestral-22b-instruct-v0.1": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/mistral-large": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/mistral-large-2-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "mistralai/mixtral-8x22b-v0.1": "404 in every probe (catalog audit 2026-08-26)",
-  "nvidia/llama-3.1-nemotron-51b-instruct": "404 in every probe (catalog audit 2026-08-26)",
-  "nvidia/nemotron-4-340b-instruct": "404 in every probe (catalog audit 2026-08-26)",
+  "microsoft/phi-3-vision-128k-instruct": "410 EOL 2026-11-15",
+  "microsoft/phi-3.5-moe-instruct": "410 EOL 2026-11-15",
+  "mistralai/codestral-22b-instruct-v0.1": "410 EOL 2026-11-15",
+  "mistralai/mistral-large": "410 EOL 2026-11-15",
+  "mistralai/mistral-large-2-instruct": "410 EOL 2026-11-15",
+  "mistralai/mixtral-8x22b-v0.1": "410 EOL 2026-11-15",
+  "nvidia/llama-3.1-nemotron-51b-instruct": "410 EOL 2026-11-15",
+  "nvidia/nemotron-4-340b-instruct": "410 EOL 2026-11-15",
   "nvidia/nemotron-mini-4b-instruct": "410 EOL 2026-08-26",
-  "nvidia/nemotron-nano-3-30b-a3b": "404 in every probe (catalog audit 2026-08-26)",
-  "nvidia/vila": "404 in every probe (catalog audit 2026-08-26)",
-  "writer/palmyra-creative-122b": "404 in every probe (catalog audit 2026-08-26)",
+  "nvidia/nemotron-nano-3-30b-a3b": "410 EOL 2026-09-01",
+  "nvidia/vila": "410 EOL 2026-11-15",
+  "writer/palmyra-creative-122b": "410 EOL 2026-11-15",
 };

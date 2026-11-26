@@ -131,14 +131,14 @@ const PROMPT = [{ role: "user", content: "Reply with exactly the word OK." }];
 // ── §1: sampling-рекомендации (подтверждение, что шлюз принимает заявленные
 // в карточках параметры, включая top_k в non-thinking режиме) ───────────────
 const samplingProbes = [
-  { model: "nvidia/nemotron-3-super-120b-a12b", body: { temperature: 1.0, top_p: 0.95, max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-bolt-e4b", body: { temperature: 1.0, top_p: 0.95, max_tokens: 512 } },
   { model: "nvidia/nemotron-3.5-lightning-30b-a3b", body: { temperature: 1.0, top_p: 0.95, max_tokens: 512 } },
   { model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", body: { temperature: 0.6, top_p: 0.95, max_tokens: 512 } },
   {
     model: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
     body: { temperature: 0.2, top_k: 1, max_tokens: 128, chat_template_kwargs: { enable_thinking: false } },
   },
-  // Карточки новых моделей (2026-10-17): super-vl — текст 1.0/0.95;
+  // Карточки новых моделей: super-vl — текст 1.0/0.95;
   // step-5-preview — 1.0/0.95 + top_k=0 (рекомендация билдера StepFun).
   { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { temperature: 1.0, top_p: 0.95, max_tokens: 512 } },
   { model: "stepfun-ai/step-5-preview", body: { temperature: 1.0, top_p: 0.95, top_k: 0, max_tokens: 512 } },
@@ -146,59 +146,61 @@ const samplingProbes = [
 
 // ── §2: потолок max_tokens (текст 400-оракула) ─────────────────────────────
 const maxTokensModels = [
-  "nvidia/nemotron-3-super-120b-a12b",
+  "nvidia/nemotron-3.5-bolt-e4b",
   "nvidia/nemotron-3.5-lightning-30b-a3b",
   "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
   "nvidia/nemotron-3-ultra-550b-a55b",
-  "deepseek-ai/deepseek-v4-flash-0731",
-  "deepseek-ai/deepseek-v4.1-flash",
-  "moonshotai/kimi-k3",
   "nvidia/nemotron-3.5-super-vl-120b-a12b",
   "stepfun-ai/step-5-preview",
+  "mistralai/mistral-large-4-1t-a52b",
+  "moonshotai/kimi-k3.1-pro",
 ];
 
-// ── §6: управление мышлением новых моделей (карточные механизмы) ───────────
-// Номер — следующий свободный пункт research/11 (§3 там занят решением по
-// `inputLimits`/vision): это план, прогон не сделан, свидетельств нет.
-// super-vl: решение уже принято по документации NIM (research/14) — нативный
-// `reasoning_effort` none|low|high, оверрайд в overrides/models.json. Здесь
-// остаётся живая ПРОВЕРКА этого выбора: что `none` действительно гасит
-// reasoning-канал, `low` его сокращает, а `"off"`/`"medium"` дают 400 (тогда
-// карта уровней обязана остаться в документированном наборе).
-// `chat_template_kwargs`-ветка ниже — контроль: NVIDIA называет её устаревшей
-// формой того же решения; если она тоже работает, смешивать всё равно нельзя.
-// step-5-preview из плана УБРАН (2026-10-30): в hosted-схеме модели нет
-// `reasoning_effort`, а `enable_thinking=false` вендор прямо запрещает («does not
-// stop reasoning generation») — проверять нечего, надо было бы проверять его
-// отсутствие на проводе.
-// glm-5.3-flash: документация NVIDIA обещает шкалу low|high|max (дефолт max),
-// приём none/minimal/medium/xhigh «но исполняются на max», и что
-// enable_thinking=false reasoning НЕ гасит. Проба: три валидных уровня,
-// контрольный bogus (ждём 400) и enable_thinking=false (ждём reasoning-канал
-// всё равно — иначе наша карта уровней не нужна).
-// muse-glimmer: документирован none…max; проверяем, что `none` реально убирает
-// reasoning-канал (это единственный уровень, который делает `off` честным).
-// diffusiongemma: мышление только через enable_thinking; проверяем приём
-// hosted-эндпоинтом (если 400 — thinkingFormat из оверрайда снять).
+// ── §6: управление мышлением и контрактные проверки (research/15–16) ───────
+// super-vl / ultra / lightning (research/16 §5): нативная шкала `reasoning_effort`
+// none…max (`off` и `bogus-level` → 400); `chat_template_kwargs.enable_thinking`
+// принимается 200, но reasoning не выключает.
+// bolt-e4b: управляемый ключ `chat_template_kwargs.enable_thinking`, top-level
+// `reasoning_effort` → 400.
+// glm-5.3-flash: шкала low|high|max, `off`/`bogus-level` → 400, без messages → 400.
+// kimi-k3.1-pro (1M, vlm), mistral-large-4-1t-a52b (1T MoE, без потолка).
+// fastino/gliner2-pii — negative-case: NER extraction (422 invalid extraction
+// request), не чат-модель.
 const thinkingProbes = [
+  { model: "nvidia/nemotron-3.5-bolt-e4b", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 256 } },
+  { model: "nvidia/nemotron-3.5-bolt-e4b", body: { chat_template_kwargs: { enable_thinking: true }, max_tokens: 256 } },
+  { model: "nvidia/nemotron-3.5-bolt-e4b", body: { reasoning_effort: "bogus-level", max_tokens: 256 } },
+  { model: "nvidia/nemotron-3-ultra-550b-a55b", body: { reasoning_effort: "none", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3-ultra-550b-a55b", body: { reasoning_effort: "low", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3-ultra-550b-a55b", body: { reasoning_effort: "high", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3-ultra-550b-a55b", body: { reasoning_effort: "off", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3-ultra-550b-a55b", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-lightning-30b-a3b", body: { reasoning_effort: "none", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-lightning-30b-a3b", body: { reasoning_effort: "low", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-lightning-30b-a3b", body: { reasoning_effort: "high", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-lightning-30b-a3b", body: { reasoning_effort: "off", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-lightning-30b-a3b", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 512 } },
   { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "none", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "minimal", max_tokens: 512 } },
   { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "low", max_tokens: 512 } },
-  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "high", max_tokens: 512 } },
-  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "off", max_tokens: 512 } },
   { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "medium", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "high", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "xhigh", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "max", max_tokens: 512 } },
+  { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { reasoning_effort: "off", max_tokens: 512 } },
   { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 512 } },
   { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { chat_template_kwargs: { enable_thinking: true }, max_tokens: 512 } },
   { model: "z-ai/glm-5.3-flash", body: { reasoning_effort: "low", max_tokens: 512 } },
   { model: "z-ai/glm-5.3-flash", body: { reasoning_effort: "high", max_tokens: 512 } },
   { model: "z-ai/glm-5.3-flash", body: { reasoning_effort: "max", max_tokens: 512 } },
+  { model: "z-ai/glm-5.3-flash", body: { reasoning_effort: "off", max_tokens: 512 } },
   { model: "z-ai/glm-5.3-flash", body: { reasoning_effort: "bogus-level", max_tokens: 512 } },
   { model: "z-ai/glm-5.3-flash", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 512 } },
   { model: "z-ai/glm-5.3-flash", body: { chat_template_kwargs: { clear_thinking: true }, max_tokens: 512 } },
-  { model: "meta/muse-glimmer-30b", body: { reasoning_effort: "none", max_tokens: 512 } },
-  { model: "meta/muse-glimmer-30b", body: { reasoning_effort: "high", max_tokens: 512 } },
-  { model: "google/diffusiongemma-26b-a4b-it", body: { max_tokens: 512 } },
-  { model: "google/diffusiongemma-26b-a4b-it", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 512 } },
-  { model: "google/diffusiongemma-26b-a4b-it", body: { chat_template_kwargs: { enable_thinking: true }, max_tokens: 512 } },
+  { model: "mistralai/mistral-large-4-1t-a52b", body: { max_tokens: 128 } },
+  { model: "moonshotai/kimi-k3.1-pro", body: { max_tokens: 128 } },
+  // Negative-case (research/16 §3): NER/extraction, ожидается 422.
+  { model: "fastino/gliner2-pii", body: { max_tokens: 64 } },
 ];
 // Потолок читаем из текста 400 («Max tokens must not exceed N»): одна
 // заведомо-большая проба + подтверждение ровно N (2 запроса на модель).

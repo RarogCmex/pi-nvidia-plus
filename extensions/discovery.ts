@@ -79,6 +79,10 @@ const NON_CHAT_PATTERNS: RegExp[] = [
   // (codellama, codegemma, codestral, granite-*-code, deepseek-coder — все 401),
   // поэтому «всё кодовое» сломало бы семь живых моделей.
   /starcoder/i,
+  // gliner — NER/извлечение сущностей (`fastino/gliner2-pii`): chat-роут есть
+  // (keyless 401), но с ключом отвечает 422 `invalid extraction request; check
+  // model, messages, labels and parameters` — исследование 16, §3.
+  /\bgliner/i,
 ];
 
 export function isChatModel(id: string): boolean {

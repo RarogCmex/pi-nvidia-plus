@@ -887,6 +887,14 @@ export const MESSAGES = {
     en: " (thinking is force-enabled at every level: with enable_thinking=false this model answers with an empty thought tag instead of content)",
     ru: " (мышление включено принудительно на любом уровне: с enable_thinking=false модель отдаёт пустой thought-тег вместо ответа)",
   },
+  // Nemotron 3.5 / 3-ultra (ретест 2026-11-26, исследование 16, §5): мышление включено
+  // дефолтом, а ключ чат-шаблона — уже не выключатель. Сам `off` работает (уходит
+  // `reasoning_effort="none"`), оговорка нужна, чтобы не искали в плане
+  // несуществующий enable_thinking=false.
+  planCaveatNemotronNativeEffort: {
+    en: " (chat_template_kwargs.enable_thinking does not switch thinking here, on or off — thinking is on by default and only `off`, sent as reasoning_effort=none, stops it)",
+    ru: " (chat_template_kwargs.enable_thinking здесь не выключатель — мышление включено дефолтом, и гасит его только off, который уходит как reasoning_effort=none)",
+  },
 
   // ── Живое обнаружение (тикет 12) ─────────────────────────────────────
   discoverHttpError: {
