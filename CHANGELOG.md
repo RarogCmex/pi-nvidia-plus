@@ -4,6 +4,39 @@ Entries are read by pi 1.5.0 and shown under "Extension Updates" on the first fr
 launch after the package version grows. Headings must stay in the `## [x.y.z]` form —
 pi's parser (`dist/utils/changelog.js`) only recognises a version triple.
 
+## [0.5.0] — 2026-11-27
+
+**Catalog sync (2026-11-26 snapshot) and re-verification on pi 1.6.1** (Node 26.10,
+`tsc` clean, 27/27 offline test files and 4/4 `acceptance:agent-dir` assertions):
+
+- **Nemotron 3.5 / 3-ultra moved to native `reasoning_effort` (`NEMOTRON_NATIVE_EFFORT`).**
+  Live retesting showed `chat_template_kwargs.enable_thinking` is accepted (HTTP 200)
+  but does not toggle reasoning on `nvidia/nemotron-3-ultra-550b-a55b`,
+  `nvidia/nemotron-3.5-lightning-30b-a3b`, or `nvidia/nemotron-3.5-super-vl-120b-a12b`,
+  whereas top-level `reasoning_effort` works across the full NIM `none…max` scale
+  (`"off"` → 400). `NEMOTRON_THINKING_MODELS` now keeps only ids where
+  `enable_thinking` is proven to switch thinking (`nemotron-3.5-bolt-e4b`,
+  `nemotron-3-nano-omni-30b-a3b-reasoning`, `nemotron-3-nano-30b-a3b`); the three
+  `NEMOTRON_NATIVE_EFFORT` ids get `compat.supportsReasoningEffort: true` and
+  `off→none`, `minimal…max→identity` in `overrides/models.json`, no injected
+  `chat_template_kwargs`, and the new `planCaveatNemotronNativeEffort` status caveat.
+- **Dead models and pruned overrides (`DEAD_MODELS`, `overrides/models.json`).**
+  Keyless 410 re-probing updated 17 `404 in every probe` entries to exact EOL dates
+  (`2026-11-15` / `2026-09-01`) and retired five models removed from `/v1/models` and
+  pi 1.6.1's built-in catalog: `nvidia/nemotron-3-super-120b-a12b` (`2026-10-03`),
+  `google/diffusiongemma-26b-a4b-it` (`2026-11-12`), `deepseek-ai/deepseek-v4.1-flash`
+  (`2026-11-16`), `openai/gpt-oss-20b` (`2026-11-18`), and `meta/muse-glimmer-30b`
+  (`2026-11-24`). Their overrides were removed (leaving 7 live `modelOverrides` plus
+  1 curated card for `nvidia/nemotron-3.5-bolt-e4b`).
+- **Non-chat discovery filter.** Added narrow `/\bgliner/i` pattern to
+  `NON_CHAT_PATTERNS` so `fastino/gliner2-pii` (NER extraction, HTTP 422) is filtered
+  out from `/nvidia-plus discover`.
+- **Tooling & docs.** `scripts/agent-dir-acceptance.mjs` ignores concurrent live
+  session/cache files in `~/.pi/agent` while strictly asserting on config/ledger
+  files; `scripts/probe-catalog-fields.mjs` updated for the live catalog;
+  `research/16-catalog-sync-2026-11-26.md`, `research/14`, `research/README.md`, and
+  `README.md` updated to match.
+
 ## [0.4.1] — 2026-11-03
 
 **Re-verified against pi 1.5.0** (2026-11-03): `tsc -p tsconfig.typecheck.json`
