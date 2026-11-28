@@ -130,6 +130,68 @@
             "xhigh": "on",
             "max": "on"
           }
+        },
+        {
+          "id": "mistralai/mistral-large-4-1t-a52b",
+          "name": "Mistral Large 4",
+          "api": "openai-completions",
+          "provider": "nvidia",
+          "baseUrl": "https://integrate.api.nvidia.com/v1",
+          "headers": { "NVCF-POLL-SECONDS": "3600" },
+          "reasoning": true,
+          "input": ["text", "image"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "compat": {
+            "supportsStore": false,
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": true,
+            "maxTokensField": "max_tokens",
+            "supportsLongCacheRetention": false,
+            "supportsStrictMode": false
+          },
+          "contextWindow": 1048576,
+          "maxTokens": 1048576,
+          "type": "chat",
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high"
+          }
+        },
+        {
+          "id": "moonshotai/kimi-k3.1-pro",
+          "name": "Kimi K3.1 Pro",
+          "api": "openai-completions",
+          "provider": "nvidia",
+          "baseUrl": "https://integrate.api.nvidia.com/v1",
+          "headers": { "NVCF-POLL-SECONDS": "3600" },
+          "reasoning": true,
+          "input": ["text", "image"],
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "compat": {
+            "supportsStore": false,
+            "supportsDeveloperRole": false,
+            "supportsReasoningEffort": true,
+            "maxTokensField": "max_tokens",
+            "supportsLongCacheRetention": false,
+            "supportsStrictMode": false
+          },
+          "contextWindow": 1048576,
+          "maxTokens": 65536,
+          "type": "chat",
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          }
         }
       ]
     }

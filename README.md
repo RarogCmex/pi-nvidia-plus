@@ -103,9 +103,9 @@ top_k: 1}` at level `off`, mirroring its card's thinking-vs-instruct split. Serv
 acceptance was probed live (including `top_k`); evidence in
 [research 11](research/11-pi-1.2-catalog-fields-probes.md) §1.
 
-**One curated card of our own** (`models` entry — this id is live on NIM
-but absent from pi 1.6.1's built-in catalog, so without a card it is not
-selectable at all; catalog sync 2026-10-23, re-verified 2026-11-26):
+**Three curated cards of our own** (`models` entries — ids that are live on NIM
+but absent from pi 1.7.0's built-in catalog, so without a card they are not
+selectable at all; catalog sync 2026-10-23 / 2026-11-28):
 
 - `nvidia/nemotron-3.5-bolt-e4b` — Nemotron 3.5 edge model (Gemma-4-E4B base).
   Card: text-only, 64K in / 64K out (vendor card), sampling `1.0 / 0.95`,
@@ -114,6 +114,26 @@ selectable at all; catalog sync 2026-10-23, re-verified 2026-11-26):
   answer without a reasoning channel, `enable_thinking=true` produces
   `reasoning_content`; top-level `reasoning_effort` is a 400, and the
   400-oracle ceiling is `1 048 576`.
+- `mistralai/mistral-large-4-1t-a52b` — Mistral Large 4, a 1T/52B-active MoE
+  (text + image in, text out). Card: `contextWindow`/`maxTokens` `1 048 576`
+  (probed 2026-11-28: the vendor's printed `max_tokens` cap `262 144` is *not*
+  enforced — `300 000` is accepted, and only the shared
+  `prompt + output ≤ 1 048 576` budget rejects), native `reasoning_effort`
+  (`low`/`medium`/`high`, default `high`; **always reasons** — `none`/`off` →
+  400, so `off` is hidden with `null`), input `text,image`. See [research 17](research/17-catalog-sync-2026-11-28.md) §7.
+- `moonshotai/kimi-k3.1-pro` — Kimi K3.1 Pro, a 3T-class MoE (text + image in,
+  text out); card: `contextWindow` `1 048 576`, `maxTokens` `65 536` (vendor
+  infer-reference), native `reasoning_effort` (`low`…`max`, default `low`,
+  forced reasoner → `off` hidden). **Card present, but the model currently does
+  not generate** (see [Limitations](#limitations)); the thinking contract is
+  vendor-documented, not probe-verified.
+
+> The three card ids carry per-model `headers` (`NVCF-POLL-SECONDS: 3600`) that
+> pi's built-in cards also carry; a `models` entry is applied by *replacement*,
+> so these three are written only for ids pi does not ship. `test/overrides-schema.test.ts`
+> 1b reddens the moment any of them appears in pi's catalog — the entry then
+> moves to `modelOverrides` (the migration already done for `minimax-m3.1-flash`,
+> `kimi-k3` and `deepseek-v4.1-flash`).
 **`minimaxai/minimax-m3.1-flash` is override-only since pi 1.5.0.** pi 1.5.0
 added the id to its built-in nvidia catalog, so a `models` entry would now
 replace that card wholesale and drop its `inputLimits` image-resize box. The
@@ -305,11 +325,18 @@ mechanics — is written up in [`research/`](research/); start at
   is now 410 EOL 2026-11-24; family caveat kept). Its reference documents
   `reasoning_effort` `none`…`max`; measured 2026-10-30: `none` returns 200 with a
   reasoning trace anyway (69 completion tokens vs 129 at `high`).
-- **Live catalog traps (2026-11-26).** `moonshotai/kimi-k3.1-pro` (`1M` `vlm`)
-  is listed in `/v1/models` but hung through headers-timeout across all tested
-  routes (same class as `gemma-4-31b-it`, so no card was added);
-  `fastino/gliner2-pii` is an extraction/NER endpoint (`422 invalid extraction
-  request`), filtered out by `/nvidia-plus discover`.
+- **Live catalog traps (re-probed 2026-11-28).** `moonshotai/kimi-k3.1-pro`
+  (`1M` `vlm`) is listed in `/v1/models`, carries
+  `supports_thinking/tools/structured_output`, and now has a curated card — but
+  it **does not generate**: `{}`, `max_tokens=1048576` and a streamed
+  `max_tokens=64` all hung on the direct route and every tested pool exit
+  (0 bytes to a 45 s timeout), so its card's thinking contract is
+  vendor-documented, not probe-verified
+  ([research 17](research/17-catalog-sync-2026-11-28.md) §7).
+  `mistralai/mistral-large-4-1t-a52b` does answer (native `reasoning_effort`,
+  always reasons) and also has a card. `fastino/gliner2-pii` is an
+  extraction/NER endpoint (`422 invalid extraction request`), filtered out by
+  `/nvidia-plus discover`.
 - **`stepfun-ai/step-5-preview` reasons whether you want it or not.** Its NIM
   card says reasoning stays enabled on this checkpoint and explicitly warns not
   to set `enable_thinking=false` (it does not stop reasoning generation); the
@@ -569,13 +596,16 @@ pi 1.7.0 touches no nvidia id, so the catalog, `overrides/models.json` and
 
 Catalog re-probed **2026-11-28** ([research 17](research/17-catalog-sync-2026-11-28.md)):
 the live `/v1/models` catalog (30 ids) still matches pi 1.7.0's 11 built-in
-cards (byte-identical to 1.6.1), all 47 `DEAD_MODELS` entries were re-confirmed
+cards (byte-identical to 1.6.1) and all 47 `DEAD_MODELS` entries were re-confirmed
 (44 with an exact `410 EOL` date, the 3 `404 in every probe` ids confirmed
-account-scoped at the NVCF layer with valid keys), so `overrides/models.json`
-and `DEAD_MODELS` are unchanged. Two endpoint facts did move: the `max_tokens`
-ceiling is now a single gateway-wide `1 048 576` (was per-model; `ultra`/
-`nano-omni` now validate too, `mistral-large-4` no longer takes 20 000 000), and
-the `deepseek` target in the keyless provider table moved to
+account-scoped at the NVCF layer with valid keys), so the seven
+`modelOverrides` and `DEAD_MODELS` are unchanged. The file did grow two curated
+`models` cards — `mistralai/mistral-large-4-1t-a52b` and
+`moonshotai/kimi-k3.1-pro` ([research 17](research/17-catalog-sync-2026-11-28.md) §7) —
+for two live ids pi's catalog does not ship. Two endpoint facts also moved: the
+`max_tokens` ceiling is now a single gateway-wide `1 048 576` (was per-model;
+`ultra`/`nano-omni` now validate too, `mistral-large-4` no longer takes
+20 000 000), and the `deepseek` target in the keyless provider table moved to
 `expectation: "json"`.
 
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript

@@ -4,6 +4,28 @@ Entries are read by pi 1.5.0 and shown under "Extension Updates" on the first fr
 launch after the package version grows. Headings must stay in the `## [x.y.z]` form —
 pi's parser (`dist/utils/changelog.js`) only recognises a version triple.
 
+## [0.6.0] — 2026-11-28
+
+**Two curated model cards added** for live NIM chat ids pi does not ship, so they
+become selectable (Node 26.10, `tsc` clean, 27/27 offline test files):
+
+- **`mistralai/mistral-large-4-1t-a52b`** — Mistral Large 4 (1T/52B-active MoE,
+  text + image). Card: `contextWindow`/`maxTokens` `1 048 576` (live 400-oracle:
+  the vendor's printed `262 144` output cap is not enforced; only the shared
+  `prompt + output ≤ 1 048 576` budget rejects), native `reasoning_effort`
+  (`low`/`medium`/`high`, always reasons → `none`/`off` 400, `off` hidden).
+- **`moonshotai/kimi-k3.1-pro`** — Kimi K3.1 Pro (3T-class MoE, text + image).
+  Card: `contextWindow` `1 048 576`, `maxTokens` `65 536` (vendor doc), native
+  `reasoning_effort` (`low`…`max`, forced reasoner). **Caveat: the model does
+  not generate right now** (hangs on every route/egress), so its thinking
+  contract is vendor-documented, not probe-verified — see README Limitations.
+
+Both entries live in `models` (not `modelOverrides`) because the ids are absent
+from pi 1.7.0's built-in nvidia catalog; `test/overrides-schema.test.ts` 1b
+reddens the moment pi ships either id (the entry then moves to `modelOverrides`,
+the same migration as `minimax-m3.1-flash`/`kimi-k3`). A new test block 3h pins
+both cards. Evidence: [research/17](research/17-catalog-sync-2026-11-28.md) §7.
+
 ## [0.5.2] — 2026-11-28
 
 **Endpoint re-probe (2026-11-28) and data re-verification on pi 1.7.0** (Node 26.10,

@@ -272,6 +272,37 @@ const deadCards = (parsed.providers?.nvidia?.models ?? [])
   .filter((id): id is string => typeof id === "string" && id in DEAD_MODELS);
 assert.deepEqual(deadCards, [], "своя карточка на мёртвой модели");
 
+// ── 3h. Две живые чат-модели без карточки pi — добавлены 2026-11-28 ─────────
+// `mistralai/mistral-large-4-1t-a52b` и `moonshotai/kimi-k3.1-pro` живут в
+// `/v1/models`, но отсутствуют во встроенном каталоге pi 1.7.0 — без своей
+// карточки id неселектируем вовсе (как bolt-e4b). Лимиты и контракт мышления —
+// research/17 §7; значения здесь — замеренные (mistral) либо doc-only (kimi,
+// генерация висит 2026-11-28, поэтому поведение не подтверждено пробой).
+const cards = parsed.providers?.nvidia?.models ?? [];
+const cardById = new Map(cards.map((c) => [c?.id, c]));
+
+const mistral = cardById.get("mistralai/mistral-large-4-1t-a52b");
+assert.ok(mistral, "карточка mistral-large-4-1t-a52b пропала");
+assert.equal(mistral.contextWindow, 1048576, "mistral: общий окно prompt+output = 1 048 576 (замерено)");
+assert.equal(mistral.maxTokens, 1048576, "mistral: карточный потолок = окно (общий бюджет), дефолт доков 262144 не enforced");
+assert.equal(mistral.reasoning, true, "mistral: модель думает всегда");
+assert.equal((mistral.compat as Record<string, unknown>)?.supportsReasoningEffort, true, "mistral: без supportsReasoningEffort:true reasoning_effort не уйдёт (nvidia — исключение авто-детекта pi)");
+assert.deepEqual(mistral.input, ["text", "image"], "mistral: вход text+image (карточка NIM)");
+const mistralMap = mistral.thinkingLevelMap as Record<string, unknown>;
+assert.equal(mistralMap.off, null, 'mistral: форс-ризонер — none/off отвергаются 400, off прячется (null, а не строка)');
+assert.ok(!Object.values(mistralMap).includes("none"), "mistral: none на проводе = 400");
+
+const kimi = cardById.get("moonshotai/kimi-k3.1-pro");
+assert.ok(kimi, "карточка kimi-k3.1-pro пропала");
+assert.equal(kimi.contextWindow, 1048576, "kimi: context_window = 1 048 576 (метаданные /v1/models + карточка)");
+assert.equal(kimi.maxTokens, 65536, "kimi: потолок max_tokens = 65536 (doc-only, проба невозможна)");
+assert.equal(kimi.reasoning, true, "kimi: supports_thinking в /v1/models + карточка");
+assert.equal((kimi.compat as Record<string, unknown>)?.supportsReasoningEffort, true, "kimi: reasoning_effort low|medium|high|max по карточке");
+assert.deepEqual(kimi.input, ["text", "image"], "kimi: pi берёт text+image из text/image/video");
+const kimiMap = kimi.thinkingLevelMap as Record<string, unknown>;
+assert.equal(kimiMap.off, null, "kimi: форс-ризонер — off прячется (как kimi-k3)");
+assert.ok(!Object.values(kimiMap).includes("none"), "kimi: none в доковой шкале отсутствует");
+
 rmSync(dir, { recursive: true, force: true });
 
 // ── 4. Файл остаётся машиночитаемым (без комментариев и хвостовых запятых) ────

@@ -170,18 +170,74 @@ keyless-таблицы провайдеров (`scripts/proxy-pool-audit.mjs pro
 
 ## §6. Принятые решения
 
-1. **`overrides/models.json` не меняется.** Ни одна проба не разошлась с
-   картой мышления/сэмплинга; пер-модельный потолок из `11`/`16` не зашит ни в
-   одну карточку.
+1. **Оверрайды не меняются; добавлены две `models`-карточки.** Ни одна проба
+   не разошлась с существующими картами мышления/сэмплинга; пер-модельный
+   потолок из `11`/`16` не зашит ни в одну карточку. Новые карточки (§7) идут
+   отдельно от 7 `modelOverrides`.
 2. **Значения `DEAD_MODELS` не меняются** — ретест подтвердил все 44 даты; три
    `404 in every probe` подтверждены авторизованно как account-scoped NVCF-404
    (комментарий модуля данных дополнен датой 2026-11-28).
 3. **Таблица провайдеров:** `deepseek` → `expectation: "json"` (см. §5).
-4. **Карточку не добавляем ни `mistral-large-4-1t-a52b`, ни `kimi-k3.1-pro`.**
-   У mistral лимитов нет ни в `/v1/models`, ни в отдельной карточке, а своя
-   `models`-запись бьёт встроенную карточку pi целиком (урок `minimax-m3.1-flash`,
-   пи 1.5.0) — до появления id у pi дельты пойдут в `modelOverrides`; у kimi
-   генерации не отвечают вовсе. Оба id остаются в живом NIM, но в pi
-   неселектируемы.
+4. **Обе карточки добавлены в `models`** (по запросу, 2026-11-28): id живы в
+   NIM, но отсутствуют во встроенном каталоге pi 1.7.0 — без своей карточки они
+   неселектируемы (как `bolt-e4b`). Лимиты и контракт — §7. Гейт 1b
+   `test/overrides-schema.test.ts` покраснеет, если pi когда-нибудь внесёт эти id
+   в базу: тогда запись переедет в `modelOverrides` (урок `minimax-m3.1-flash`).
 5. **`glm-5.3-flash`:** оверрайд оставлен (оживаемость), регресс-завис вынесен
    в README (Limitations) как наблюдение на 2026-11-28.
+
+## §7. Две новые карточки: `mistral-large-4-1t-a52b` и `kimi-k3.1-pro`
+
+Добавлены по явному запросу (методика лимитов — [`../skills/pi-provider-plugin/references/research.md`](../../skills/pi-provider-plugin/references/research.md):
+Lane B — карточки вендора как гипотезы, Lane C — free-оракулы). Источники по
+доверию: живой замер > machine-readable listing/API-reference > проза карточки.
+
+### `mistralai/mistral-large-4-1t-a52b`
+
+- **Документация.** Modelcard (build.nvidia.com): вход Text, Image, выход Text,
+  1T-total / 52B-active MoE, «combined input/output context length is 1M tokens»;
+  get-started (docs.nvidia.com): 1 048 576-токенное окно. API-reference: `max_tokens`
+  Default 4096, **Minimum 1 / Maximum 262 144**; `reasoning_effort` = `low`|`medium`|`high`
+  (**Default `high`**), модель **думает всегда**, `"none"` → **HTTP 400**.
+  Проза build-«Specifications» сказала «Context Length: 262K» — **расхождение**
+  (решает замер).
+- **Free-оракулы.** `GET /v1/models/{id}` (keyless) отдаёт только базовые поля —
+  лимитов нет. 400-оракул `max_tokens`: `262144` / `262145` / `300000` → **200**
+  (докский потолок 262 144 **не enforced**); `1048576` → `400 context_length`
+  (`limit 1048576, actual 1048598`). ⇒ окно = **1 048 576**, и `max_tokens`
+  ограничен только **общим бюджетом `prompt + max_tokens ≤ 1 048 576`**.
+- **Контракт мышления (живые пробы).** `reasoning_effort` `low`/`medium`/`high` →
+  `200` (reasoning_tokens 30–31), без поля → `200` (reasoning 75, дефолт `high`);
+  `none` / `off` / `bogus-level` → **400**. Форс-ризонер.
+- **Карточка:** `contextWindow` `1048576`, `maxTokens` `1048576` (общий бюджет —
+  README-caveat, не уменьшаем), `input ["text","image"]`, `reasoning: true`,
+  `compat.supportsReasoningEffort: true` (host `nvidia` — исключение авто-детекта
+  pi, флаг обязателен), карта `off: null` (скрыть), `minimal/low→low`,
+  `medium→medium`, `high/xhigh/max→high` (доковая шкала `low|medium|high`).
+
+### `moonshotai/kimi-k3.1-pro`
+
+- **Документация.** build-карточка: context 1M, вход Text/Image/Video, выход Text,
+  function calling / structured output / reasoning; `/v1/models` (и retrieve)
+  несёт `context_window: 1048576`, `model_type: "vlm"`, `supports_structured_output/thinking/tools: true`.
+  Infer-reference (docs.api.nvidia.com): `max_tokens` **1..65 536**, `reasoning_effort`
+  `low`|`medium`|`high`|`max` (**Default `low`**), `temperature 0..1` (прочие
+  sampling-параметры зафиксированы вендором); build-apireference дал enum
+  `low|high|max` — **расхождение** в наборе effort-токенов. Выходной лимит
+  карточкой **не раскрыт**.
+- **Замер невозможен.** Генерация мертва: `{}`, `max_tokens=1048576` и
+  стриминговый `max_tokens=64` (`reasoning_effort=low` и без) виснут и напрямую,
+  и через выходы пула (0 байт до таймаута 45 с; в §4 — то же на 3 выходах).
+  Прошёл лишь один 400-валидатор (через выход). ⇒ контракт мышления и потолок
+  **doc-only, пробой не подтверждены**.
+- **Карточка:** `contextWindow` `1048576` (замер через retrieve + карточка),
+  `maxTokens` `65536` (doc-only), `input ["text","image"]` (pi не умеет video),
+  `reasoning: true` (`supports_thinking` в listing + карточка),
+  `compat.supportsReasoningEffort: true`, карта `off: null` (форс-ризонер, как
+  `kimi-k3`), `minimal/low→low`, `medium→medium`, `high→high`, `xhigh/max→max`.
+- **Caveat.** Карточка делает id селектируемым, но **модель сейчас не генерирует**
+  (см. README Limitations); при оживании маршрута контракт мышления надо
+  перемерить и при расхождении поправить карту.
+
+Обе записи — в `models` (не `modelOverrides`), потому что id отсутствуют во
+встроенном каталоге pi 1.7.0; гейт 1b отслеживает возможное появление id у pi.

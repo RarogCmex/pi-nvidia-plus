@@ -115,10 +115,14 @@ npm run check              # typecheck + офлайн-тесты — обяза�
   `inputLimits`) — и перестаёт обновляться вместе с хостом. Правка отдельных
   полей идёт через `modelOverrides` (мержится поключно, `compat` — через
   `mergeCompat`); `test/overrides-schema.test.ts` (блок 1b) сверяет `models` со
-  встроенным каталогом установленной pi и краснеет на затенении. Записи, убранные
-  из `overrides/models.json`, применение вычищает из пользовательского
-  `models.json` само (`finalizeOwnedState`, `pruned`) — если пользователь их не
-  правил.
+  встроенным каталогом установленной pi и краснеет на затенении. Исключение —
+  id, которых во встроенном каталоге pi **нет** (`nvidia/nemotron-3.5-bolt-e4b`,
+  `mistralai/mistral-large-4-1t-a52b`, `moonshotai/kimi-k3.1-pro`): без
+  `models`-записи они неселектируемы вовсе, а 1b как раз следит, чтобы такая
+  запись не затеняла встроенную (если pi внесёт id — запись переезжает в
+  `modelOverrides`). Записи, убранные из `overrides/models.json`, применение
+  вычищает из пользовательского `models.json` само (`finalizeOwnedState`,
+  `pruned`) — если пользователь их не правил.
 - **Значения `DEAD_MODELS` видны пользователю** — они подставляются в
   `{reason}` уведомлений (`i18n.ts`: `deadOnSelect`, `deadObservedMarked`,
   `respDeadNote`). Никаких внутренних id, номеров рабочих элементов и
