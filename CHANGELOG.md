@@ -4,6 +4,33 @@ Entries are read by pi 1.5.0 and shown under "Extension Updates" on the first fr
 launch after the package version grows. Headings must stay in the `## [x.y.z]` form —
 pi's parser (`dist/utils/changelog.js`) only recognises a version triple.
 
+## [0.5.2] — 2026-11-28
+
+**Endpoint re-probe (2026-11-28) and data re-verification on pi 1.7.0** (Node 26.10,
+`tsc` clean, 27/27 offline test files). No behavioural code change — the catalog
+values were re-confirmed rather than edited:
+
+- **Catalog re-confirmed.** The live `/v1/models` snapshot (30 ids, 14 chat / 16
+  non-chat) still matches pi 1.7.0's 11 built-in nvidia cards (byte-identical to
+  1.6.1), so `overrides/models.json`, `DEAD_MODELS` and the thinking maps are
+  unchanged.
+- **`DEAD_MODELS` fully re-probed.** Keyless 410 probing re-confirmed all 44 dated
+  entries; the three `404 in every probe` ids (`google/gemma-3-4b-it`,
+  `google/gemma-3-12b-it`, `nvidia/cosmos-reason2-8b`) were re-confirmed as
+  account-scoped NVCF-layer 404s with valid keys.
+- **`max_tokens` ceiling is now gateway-wide `1 048 576`.** The 400-oracle no longer
+  varies per model (`ultra`/`nano-omni` now validate too; `mistral-large-4-1t-a52b`
+  no longer accepts 20 000 000) — a change from research 11/16, recorded for the
+  record; nothing in the extension hardcodes a higher budget.
+- **Keyless provider table.** `deepseek` moved from `expectation: "any"` to
+  `"json"` (its 401 now carries `application/json`), tightening proxy-interstitial
+  detection; `together` and `cohere` stay `any`.
+- **`z-ai/glm-5.3-flash` regressed to an all-routes hang** (every body, egress and
+  key on 2026-11-28 after a `200` on 2026-11-26) — documented in Limitations; the
+  override is kept in case the route recovers.
+
+Evidence: [research/17](research/17-catalog-sync-2026-11-28.md).
+
 ## [0.5.1] — 2026-11-27
 
 **Re-verified on pi 1.7.0** (Node 26.10, `tsc` clean, 27/27 offline test files).

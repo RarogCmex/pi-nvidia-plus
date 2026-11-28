@@ -12,7 +12,13 @@
  * дата перебита оракулом; ушли из живого каталога и получили явный 410
  * nvidia/nemotron-3-super-120b-a12b (2026-10-03), diffusiongemma-26b-a4b-it
  * (2026-11-12), deepseek-v4.1-flash (2026-11-16), gpt-oss-20b (2026-11-18) и
- * muse-glimmer-30b (2026-11-24) — исследование 16, §2).
+ * muse-glimmer-30b (2026-11-24) — исследование 16, §2;
+ * ретест 2026-11-28: все 44 датированные записи перепройдены keyless-ом и
+ * совпали с таблицей (правок нет), а три «404 in every probe»
+ * (google/gemma-3-4b-it, google/gemma-3-12b-it, nvidia/cosmos-reason2-8b)
+ * подтверждены авторизованно как 404 «Not found for account» на валидных
+ * ключах — смерть account-scoped на слое NVCF, а не на HTTP-роуте
+ * (исследование 17, §2).
  *
  * Вынесен из входной точки, чтобы `scripts/discover-models.mjs` импортировал
  * таблицу напрямую (type-stripping, Node ≥ 22.19), а не держал копию.

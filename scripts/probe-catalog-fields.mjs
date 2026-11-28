@@ -142,6 +142,10 @@ const samplingProbes = [
   // step-5-preview — 1.0/0.95 + top_k=0 (рекомендация билдера StepFun).
   { model: "nvidia/nemotron-3.5-super-vl-120b-a12b", body: { temperature: 1.0, top_p: 0.95, max_tokens: 512 } },
   { model: "stepfun-ai/step-5-preview", body: { temperature: 1.0, top_p: 0.95, top_k: 0, max_tokens: 512 } },
+  // 2026-11-28: `cosmos-reason2-8b` числится в DEAD_MODELS («404 in every
+  // probe», research/16 §2.3), но keyless POST теперь даёт 401 (роут есть), а
+  // pi 1.7.0 включила её в built-in каталог — нужна авторизованная серия.
+  { model: "nvidia/cosmos-reason2-8b", body: { temperature: 1.0, top_p: 0.95, max_tokens: 512 } },
 ];
 
 // ── §2: потолок max_tokens (текст 400-оракула) ─────────────────────────────
@@ -154,6 +158,13 @@ const maxTokensModels = [
   "stepfun-ai/step-5-preview",
   "mistralai/mistral-large-4-1t-a52b",
   "moonshotai/kimi-k3.1-pro",
+  // 2026-11-28: судьба трёх записей DEAD_MODELS, которые keyless POST
+  // держает живыми (401): 200 с ключом «реанимирует», 404 подтверждает смерть
+  // на слое NVCF (research/06 §6.2). Обе gemma живы и в /v1/models, и в
+  // built-in каталоге pi 1.7.0 — проба решает, предупреждать или нет.
+  "nvidia/cosmos-reason2-8b",
+  "google/gemma-3-4b-it",
+  "google/gemma-3-12b-it",
 ];
 
 // ── §6: управление мышлением и контрактные проверки (research/15–16) ───────
@@ -201,6 +212,12 @@ const thinkingProbes = [
   { model: "moonshotai/kimi-k3.1-pro", body: { max_tokens: 128 } },
   // Negative-case (research/16 §3): NER/extraction, ожидается 422.
   { model: "fastino/gliner2-pii", body: { max_tokens: 64 } },
+  // 2026-11-28: контракт реанимируемого `cosmos-reason2-8b` (карточка pi 1.7.0
+  // заявляет reasoning:true) — принимает ли нативный `reasoning_effort` и
+  // управляется ли `chat_template_kwargs.enable_thinking`, как bolt-e4b.
+  { model: "nvidia/cosmos-reason2-8b", body: { reasoning_effort: "high", max_tokens: 256 } },
+  { model: "nvidia/cosmos-reason2-8b", body: { reasoning_effort: "bogus-level", max_tokens: 256 } },
+  { model: "nvidia/cosmos-reason2-8b", body: { chat_template_kwargs: { enable_thinking: false }, max_tokens: 256 } },
 ];
 // Потолок читаем из текста 400 («Max tokens must not exceed N»): одна
 // заведомо-большая проба + подтверждение ровно N (2 запроса на модель).

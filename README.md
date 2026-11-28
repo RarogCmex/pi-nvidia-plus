@@ -283,8 +283,13 @@ mechanics — is written up in [`research/`](research/); start at
   answered nothing at all — direct plus four pool exits each timed out on
   headers (15 attempts, `max_tokens: 512`), the same all-routes hang that
   [research 10](research/10-nim-route-dependent-hangs-2026-10-12.md) describes.
-  Re-probe when the route recovers: three requests settle it (see
-  `scripts/probe-catalog-fields.mjs` §6).
+  It answered `200` once on 2026-11-26 ([research 16](research/16-catalog-sync-2026-11-26.md) §3),
+  then regressed: on 2026-11-28 every body (`reasoning_effort`
+  `low`/`high`/`max`/`off`/`bogus`, `enable_thinking=false`, `clear_thinking=true`)
+  and every egress (direct plus four exits, four keys) hung again — a
+  model-scoped, not key-scoped, route hang
+  ([research 17](research/17-catalog-sync-2026-11-28.md) §4). The override is kept
+  in case the route recovers; re-probe then (`scripts/probe-catalog-fields.mjs` §6).
 - **DiffusionGemma was force-enabled, not switchable** (`google/diffusiongemma-26b-a4b-it`
   is now 410 EOL 2026-11-12; family hook kept for future ids). On 2026-10-30 the hosted
   endpoint answered `Reply with exactly the word OK.` / `Name the capital of
@@ -428,11 +433,13 @@ means "the service answered, the tunnel is alive", while a 404 means the probe
 URL itself went stale and is reported as `mismatch`, not as a bad exit.
 `npm run proxies:providers` re-measures the whole table on demand, which is how
 the stale `fireworks` URL was caught (`/v1/models` → 404 JSON "Path not found";
-the working path is `/inference/v1/models`). Three providers answer a keyless
-request with a non-JSON body (Together 401 text/plain, DeepSeek 401 with no
-content-type, Cohere 403 text/html); those are marked `expectation: "any"` and
-pinned by status instead, which is weaker against a proxy's own interstitial and
-documented as such in the table.
+the working path is `/inference/v1/models`). Two providers answer a keyless
+request with a non-JSON body (Together 401 text/plain, Cohere 403 text/html);
+those are marked `expectation: "any"` and pinned by status instead, which is
+weaker against a proxy's own interstitial and documented as such in the table.
+DeepSeek used to sit in that group too, but it was moved to `expectation: "json"`
+on 2026-11-28 — its 401 now carries `application/json`
+([research 17](research/17-catalog-sync-2026-11-28.md) §5), tightening the check.
 
 `keys:auth-check` / `keys:cleanup-dead` (`scripts/keys-audit.mjs`) are the CLI
 twins of the same oracle: no generation, no key quota, decisions from the pure
@@ -559,6 +566,17 @@ extension never read those APIs, and no hook it uses (`session_start`,
 pi 1.7.0 touches no nvidia id, so the catalog, `overrides/models.json` and
 `DEAD_MODELS` are unchanged; no live probe needed. Loading in an isolated
 `PI_CODING_AGENT_DIR` passes, and `acceptance:agent-dir` passes 4/4.
+
+Catalog re-probed **2026-11-28** ([research 17](research/17-catalog-sync-2026-11-28.md)):
+the live `/v1/models` catalog (30 ids) still matches pi 1.7.0's 11 built-in
+cards (byte-identical to 1.6.1), all 47 `DEAD_MODELS` entries were re-confirmed
+(44 with an exact `410 EOL` date, the 3 `404 in every probe` ids confirmed
+account-scoped at the NVCF layer with valid keys), so `overrides/models.json`
+and `DEAD_MODELS` are unchanged. Two endpoint facts did move: the `max_tokens`
+ceiling is now a single gateway-wide `1 048 576` (was per-model; `ultra`/
+`nano-omni` now validate too, `mistral-large-4` no longer takes 20 000 000), and
+the `deepseek` target in the keyless provider table moved to
+`expectation: "json"`.
 
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
 devDependency (`link-pi.mjs` links pi's packages and undici), so TypeScript must

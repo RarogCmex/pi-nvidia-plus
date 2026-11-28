@@ -103,11 +103,14 @@ const REPORT_DIR = join(repoRoot, "test-results");
  * неожиданным статусом получает вердикт `mismatch`, а не `hijack`.
  *
  * `expectation: "any"` стоит там, где провайдер на keyless-запрос отвечает НЕ
- * JSON-ом: together (401 text/plain «Missing API key»), deepseek (401 без
- * content-type, «Authentication Fails (governor)»), cohere (403 text/html).
- * Это ослабляет распознавание вендорской заглушки прокси, поэтому статус там
- * зажат списком `okStatuses`. Тела и статусы замерены напрямую 2026-10-10;
- * перемерить таблицу на месте — `npm run proxies:providers`.
+ * JSON-ом: together (401 text/plain «Missing API key») и cohere (403
+ * text/html). Это ослабляет распознавание вендорской заглушки прокси, поэтому
+ * статус там зажат списком `okStatuses`. Тела и статусы замерены напрямую
+ * 2026-10-10; перемерить таблицу на месте — `npm run proxies:providers`.
+ * 2026-11-28 DeepSeek переведён на `expectation: "json"`: 401 приходит с
+ * `application/json` («Authentication Fails (governor)») и напрямую, и через
+ * выход пула — прежнего «401 без content-type» больше нет (перемерено
+ * заново, research/17).
  */
 const PROBE_TARGETS = [
   { id: "nvidia", label: "NVIDIA NIM", url: "https://integrate.api.nvidia.com/v1/models", expectation: "json", okStatuses: [200, 401] },
@@ -119,7 +122,7 @@ const PROBE_TARGETS = [
   { id: "deepinfra", label: "DeepInfra", url: "https://api.deepinfra.com/v1/openai/models", expectation: "json", okStatuses: [200, 401] },
   { id: "together", label: "Together AI", url: "https://api.together.xyz/v1/models", expectation: "any", okStatuses: [401] },
   { id: "mistral", label: "Mistral AI", url: "https://api.mistral.ai/v1/models", expectation: "json", okStatuses: [401] },
-  { id: "deepseek", label: "DeepSeek", url: "https://api.deepseek.com/models", expectation: "any", okStatuses: [401] },
+  { id: "deepseek", label: "DeepSeek", url: "https://api.deepseek.com/models", expectation: "json", okStatuses: [401] },
   { id: "xai", label: "xAI", url: "https://api.x.ai/v1/models", expectation: "json", okStatuses: [401] },
   { id: "cerebras", label: "Cerebras", url: "https://api.cerebras.ai/v1/models", expectation: "json", okStatuses: [401, 403] },
   { id: "sambanova", label: "SambaNova", url: "https://api.sambanova.ai/v1/models", expectation: "json", okStatuses: [200, 401] },
