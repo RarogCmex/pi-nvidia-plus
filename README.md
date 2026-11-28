@@ -550,6 +550,16 @@ down to **11 ids** (default remains `nvidia/nemotron-3.5-super-vl-120b-a12b`),
 matching the 2026-11-26 catalog sync (`overrides/models.json` now holds 7
 overrides plus 1 curated card for `nvidia/nemotron-3.5-bolt-e4b`). Loading in an isolated `PI_CODING_AGENT_DIR` and `acceptance:agent-dir` pass 4/4.
 
+Re-verified on **pi 1.7.0** (2026-11-27): typecheck (`tsc`) plus all 27 test
+files green, Node 26.10. pi 1.7.0 removes install-telemetry
+(`/api/report-install`, `enableInstallTelemetry`, `PI_TELEMETRY`) — this
+extension never read those APIs, and no hook it uses (`session_start`,
+`model_select`, `thinking_level_select`, `before_provider_request`,
+`after_provider_response`, `message_end`) changed for the `nvidia` provider.
+pi 1.7.0 touches no nvidia id, so the catalog, `overrides/models.json` and
+`DEAD_MODELS` are unchanged; no live probe needed. Loading in an isolated
+`PI_CODING_AGENT_DIR` passes, and `acceptance:agent-dir` passes 4/4.
+
 `npm run typecheck` shells out to a bare `tsc`, and this repo has no TypeScript
 devDependency (`link-pi.mjs` links pi's packages and undici), so TypeScript must
 be on your `PATH`: `npm i -g typescript@5.9.3` — the version CI pins

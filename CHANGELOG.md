@@ -4,6 +4,16 @@ Entries are read by pi 1.5.0 and shown under "Extension Updates" on the first fr
 launch after the package version grows. Headings must stay in the `## [x.y.z]` form —
 pi's parser (`dist/utils/changelog.js`) only recognises a version triple.
 
+## [0.5.1] — 2026-11-27
+
+**Re-verified on pi 1.7.0** (Node 26.10, `tsc` clean, 27/27 offline test files).
+pi 1.7.0 removes install-telemetry (`/api/report-install`,
+`enableInstallTelemetry`, `PI_TELEMETRY`) — this extension never read those APIs,
+and no hook it uses (`session_start`, `model_select`, `thinking_level_select`,
+`before_provider_request`, `after_provider_response`, `message_end`) changed for
+the `nvidia` provider. pi 1.7.0 touches no nvidia id, so the catalog,
+`overrides/models.json` and `DEAD_MODELS` are unchanged; no live probe needed.
+
 ## [0.5.0] — 2026-11-27
 
 **Catalog sync (2026-11-26 snapshot) and re-verification on pi 1.6.1** (Node 26.10,
